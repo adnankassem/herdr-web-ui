@@ -93,10 +93,11 @@ export function send(client: Client, message: ServerMessage): number {
  * What a connection may do, its observe processes, and its end. A connection's panes stay with the
  * terminal code: `detachClaimed` detaches them while the claims still count, `dropClaims` forgets them.
  */
-export function createConnections<Lease>({ clients, present, pending, devices, detachClaimed, dropClaims }: {
+export function createConnections({ clients, present, pending, devices, detachClaimed, dropClaims }: {
   clients: Set<Client>;
   present: Set<Client>;
-  pending: PendingInputs<Client, Lease>;
+  /** the pending messages' end for a connection: its own are held, whoever else the store holds messages for */
+  pending: Pick<PendingInputs<Client, unknown>, "close">;
   devices: DeviceStore;
   detachClaimed: (client: Client) => void;
   dropClaims: (client: Client) => void;

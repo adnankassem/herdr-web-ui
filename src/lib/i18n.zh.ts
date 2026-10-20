@@ -483,6 +483,22 @@ export const ZH: Record<string, string> = {
   "Starting {agent}… up to 60s": "正在启动 {agent}… 最多 60 秒",
   "Starting shell…": "正在启动 Shell…",
   "Directory not found": "找不到目录",
+  // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
+  "model, effort": "模型、推理强度",
+  "Model": "模型",
+  "Empty: the agent's own model.": "留空则使用代理自身的模型。",
+  "One model name, without spaces.": "填写一个不含空格的模型名称。",
+  "Effort": "推理强度",
+  "Levels depend on the model.": "可选的级别取决于模型。",
+  "First message": "第一条消息",
+  "Optional": "可选",
+  "Sent to {agent} as it starts.": "随 {agent} 启动一起发送。",
+  "Queued for {agent}'s first turn: sent once it is ready, shown as a pending message until then.": "排队等待 {agent} 的第一轮：就绪后发送，在此之前显示为待发送消息。",
+  "Add {skill} to the message": "把 {skill} 加入消息",
+  "No skills for {agent} in this folder.": "此文件夹中没有 {agent} 的 Skill。",
+  "Skills are listed once the directory exists.": "目录存在后才会列出 Skill。",
+  "This PC's bridge does not list skills yet.": "这台 PC 的桥接尚不能列出 Skill。",
+  "New tab with an agent…": "带代理的新标签页…",
 
   // ---- folder browser ----
   "Choose a folder": "选择文件夹",

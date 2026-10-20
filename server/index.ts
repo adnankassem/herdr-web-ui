@@ -8,7 +8,7 @@ import { readHerdrProfiles, type HerdrMachineProfile } from "./herdr-profiles.ts
 import { accessSync, constants, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { AgentKind, HealthAuth, HerdrPane, IntegrationsResponse, PanePlan, PluginActionsResponse, ProjectFavicon } from "../shared/protocol.ts";
+import type { AgentKind, HealthAuth, HerdrPane, IntegrationsResponse, PanePlan, PendingMessage, PluginActionsResponse, ProjectFavicon } from "../shared/protocol.ts";
 import { DEFAULT_PORT } from "../shared/protocol.ts";
 import { DEVICE_COOKIE, authClient, bearerMatches, handleAuthRequest, isAuthenticated, isSecureRequest, parseCookies, presentedToken, presentedTokenHeld, recordPresentedTokenFailure, requiresAuth, unauthorizedJson } from "./auth.ts";
 import { cameThroughProxy, decideAccess, isLoopbackAddress, isLoopbackBind, isServeOwnerRequest, lanExposed } from "./access.ts";
@@ -135,6 +135,8 @@ export interface ServerInstance {
   hostname: string;
   statusReady: Promise<void>;
   alertsSettled: () => Promise<void>;
+  /** queues a create request's first message for a pane's agent, as POST /api/workspace/create and /api/tab/create do with `first_message`: for tests that start no agent */
+  queueFirstMessage: (paneId: string, text: string, kind: string) => Promise<PendingMessage>;
   stop: () => void;
 }
 
@@ -241,7 +243,7 @@ export function createServer(
   const draftTimer = setInterval(() => openCodeState.prune(), 60_000);
   draftTimer.unref();
   const core = createCore({ options: { ...options, openCodeState }, devices, usage, usageLogin, TYPED_SETTLE_MS, KEY_SETTLE_MS, SUBMIT_DEADLINE_MS, SUBMIT_DELAY_MS, DRAFT_CLEAR_WAIT_MS, DRAFT_CLEAR_POLL_MS });
-  const { sidecar, serialize, push, logPushError, omo, claudeAgents, plans, clientSnapshot, machines, broadcastAll, collector } = core;
+  const { sidecar, serialize, push, logPushError, omo, claudeAgents, plans, clientSnapshot, machines, broadcastAll, collector, queueFirstMessage } = core;
   // started after createCore's Node probe (server/pty/sidecar.ts), which can hold the thread up to 3 s: that wait
   // would count against the read's own 2.5 s limit, and a read cut short leaves the owner unknown for 5 minutes
   identityOf(false, null);
@@ -273,7 +275,7 @@ export function createServer(
       const url = new URL(request.url);
       let { pathname } = url;
       const bridgeAuthorized = isAuthenticated(request, bridgeToken);
-      const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
+      const bridgePath = pathname === "/api/bridge" || pathname === "/api/session" || pathname === SESSION_HISTORY_PATH || pathname === "/api/agents" || pathname === "/api/agent/rename" || pathname === "/api/agent/commands" || pathname === "/api/integrations" || pathname === "/api/plugins/actions" || pathname === "/api/plugin/action" || pathname.startsWith("/api/pane/") || pathname.startsWith("/api/workspace/") || pathname.startsWith("/api/worktree/") || pathname.startsWith("/api/tab/") || pathname === "/api/layout/ratio" || pathname.startsWith("/api/fs/") || pathname === "/ws";
       const ip = bunServer.requestIP(request);
       const loopback = ip !== null && isLoopbackAddress(ip.address);
       const forwarded = cameThroughProxy(request.headers);
@@ -341,7 +343,9 @@ export function createServer(
       const repositoryDiff = /^\/api\/(?:machines\/[^/]+\/)?workspace\/diff\//.test(pathname);
       // earlier sessions carry their first prompts
       const sessionHistory = /^\/api\/(?:machines\/[^/]+\/)?sessions\/history$/.test(pathname);
-      if (readOnly && (fileRead || directoryListing || repositoryDiff || sessionHistory || mutating && !ownPreferences)) {
+      // an agent's commands in a folder are read from that folder's command files, as a directory listing and a file read are
+      const agentCommands = /^\/api\/(?:machines\/[^/]+\/)?agent\/commands$/.test(pathname);
+      if (readOnly && (fileRead || directoryListing || repositoryDiff || sessionHistory || agentCommands || mutating && !ownPreferences)) {
         return jsonResponse({ error: { code: "read_only", message: "this device can only watch" } }, 403);
       }
 
@@ -363,7 +367,7 @@ export function createServer(
         if (pathname.startsWith("/api/machines/local/")) {
           if (!sameOrigin(request) || (request.method !== "GET" && request.headers.get("x-herdr-machine") !== "1")) return jsonResponse({ error: { code: "invalid_origin", message: "Use PC controls from this app" } }, 403);
           pathname = pathname.replace("/api/machines/local/", "/api/");
-          if (!/^\/api\/(session|agents|integrations|pane\/|workspace\/|worktree\/|tab\/|layout\/ratio$|agent\/rename$|plugins\/actions$|plugin\/action$|sessions\/history$)/.test(pathname)) return badRequest("invalid_route", "Unknown PC endpoint");
+          if (!/^\/api\/(session|agents|integrations|pane\/|workspace\/|worktree\/|tab\/|layout\/ratio$|agent\/(?:rename|commands)$|plugins\/actions$|plugin\/action$|sessions\/history$)/.test(pathname)) return badRequest("invalid_route", "Unknown PC endpoint");
           url.pathname = pathname;
         } else {
           // a worktree made with an agent waits on git and then agent.start, up to 150 s on the PC
@@ -548,7 +552,7 @@ export function createServer(
         return media ?? jsonResponse({ error: { code: "not_found", message: "no such page media" } }, 404);
       }
 
-      const workspaceResponse = await handleWorkspaceRequest(request, url, pathname, bunServer, broadcastAll);
+      const workspaceResponse = await handleWorkspaceRequest(request, url, pathname, bunServer, broadcastAll, queueFirstMessage);
       if (workspaceResponse) return workspaceResponse;
 
       if (pathname === "/api/plugins/actions") {
@@ -711,6 +715,8 @@ export function createServer(
     port: server.port ?? 0,
     hostname,
     statusReady: collector.ready,
+    /** a create request's first message for a pane's agent, as the create routes queue it (server/core/pending.ts); for tests that run no agent */
+    queueFirstMessage,
     alertsSettled: () => push.settled(),
     stop: () => {
       settlePortalStartup({ ok: false, error: new Error("Server stopped before Portal startup cleanup completed") });

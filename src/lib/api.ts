@@ -770,6 +770,16 @@ export async function fetchPaneCommands(paneId: string, machineId = "local"): Pr
   return (await getJson<{ commands: SlashCommand[] }>(machinePath(machineId, `pane/commands?pane_id=${encodeURIComponent(paneId)}`))).commands;
 }
 
+/**
+ * GET /api/agent/commands?agent=&cwd=: the commands `agent` would offer in `cwd` before any pane runs it
+ * (the new workspace and tab dialogs list its skills), read from the bridge's tables and the folder; no
+ * process is started for it. A folder of null asks for the agent's own and the user's skills alone.
+ */
+export async function fetchAgentCommands(agent: string, cwd: string | null, machineId = "local"): Promise<SlashCommand[]> {
+  const query = new URLSearchParams({ agent, ...(cwd === null || cwd.trim() === "" ? {} : { cwd }) });
+  return (await getJson<{ commands: SlashCommand[] }>(`${machinePath(machineId, "agent/commands")}?${query.toString()}`)).commands;
+}
+
 /** GET /api/pane/omo-tasks: the background tasks and workflows the pane's OmO session started, and that PC's clock. */
 export async function fetchPaneOmoActivity(paneId: string, machineId = "local"): Promise<{ tasks: OmoActivity["tasks"]; runs: OmoActivity["runs"]; serverTime: string | null }> {
   const activity = await getJson<Partial<OmoActivity>>(machinePath(machineId, `pane/omo-tasks?pane_id=${encodeURIComponent(paneId)}`));

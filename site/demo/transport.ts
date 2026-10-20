@@ -21,7 +21,7 @@ import { neighborPane } from "../../src/lib/layoutMap.ts";
 import { closeLayoutPane, resizeLayout, setLayoutSplitRatio, splitLayout, swapLayoutPanes } from "../../src/lib/layoutTree.ts";
 import { rollupStatus } from "../../src/lib/status.ts";
 import { movedTabOrder } from "../../src/lib/tabOrder.ts";
-import { CHATS, PROMPT, SESSION_HISTORY_AGENTS, sessionHistoryRows, SPECS, type DemoSpec } from "./fixtures.ts";
+import { agentSkillRows, CHATS, PROMPT, SESSION_HISTORY_AGENTS, sessionHistoryRows, SPECS, type DemoSpec } from "./fixtures.ts";
 import { DemoHistory } from "./history.ts";
 import machinesFixture from "./fixtures/machines.json";
 import agentsFixture from "./fixtures/agents.json";
@@ -468,10 +468,52 @@ function terminalPreview(paneId: string, text: string, name: string): string {
 const now = () => new Date().toISOString();
 
 /** The bridge takes one accepted pending message when the current mock turn finishes. */
+/**
+ * The first messages create requests queued for new panes' agents (`first_message`), by pane, as the
+ * bridge keeps them: told to every socket attached to the pane, typed into the chat once when the
+ * agent is first ready and a socket is attached, discarded or sent now through pending-action.
+ */
+const firstMessages = new Map<string, PendingMessage>();
+let nextFirst = 1;
+
+/** What is wrong with a create request's `first_message`, as the bridge refuses it (server/workspace-routes.ts firstMessageFault). */
+function firstMessageFault(value: unknown, agent: string | null): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return "first_message must be a string";
+  if (value.trim() === "" || value.length > 20_000) return "first_message must contain text and be at most 20000 characters";
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(value)) return "first_message must not contain terminal control characters";
+  if (agent === null) return "first_message needs an agent to send it to";
+  return null;
+}
+
+function queueFirstMessage(paneId: string, text: string): PendingMessage {
+  const message: PendingMessage = { id: `demo-first-${nextFirst}`, request_id: -nextFirst, text, state: "queued", created_at: now() };
+  nextFirst += 1;
+  firstMessages.set(paneId, message);
+  publishFirstMessage(paneId);
+  return message;
+}
+
+function publishFirstMessage(paneId: string, removed?: { id: string; outcome: "sent" | "discarded" }[]): void {
+  const message = firstMessages.get(paneId);
+  for (const socket of sockets) if (socket.attachedTo(paneId)) socket.push({ type: "pending-messages", pane_id: paneId, messages: message ? [structuredClone(message)] : [], ...(removed ? { removed } : {}) });
+}
+
+/** The pane's first message typed into its chat, if one waits and a socket is attached to type it; false otherwise. */
+function deliverFirstMessage(paneId: string): boolean {
+  const message = firstMessages.get(paneId);
+  if (!message || message.state !== "queued" || ![...sockets].some((socket) => socket.attachedTo(paneId))) return false;
+  firstMessages.delete(paneId);
+  submitToChat(paneId, message.text);
+  publishFirstMessage(paneId, [{ id: message.id, outcome: "sent" }]);
+  return true;
+}
+
 function finishDemoTurn(paneId: string, status: "idle" | "done" = "done"): void {
   replying.delete(paneId);
   if (!paneOf(paneId)) return;
   setStatus(paneId, status);
+  if (deliverFirstMessage(paneId)) return;
   for (const socket of [...sockets].sort((a, b) => a.pendingOrder(paneId) - b.pendingOrder(paneId))) {
     if (socket.drainPending(paneId)) break;
   }
@@ -811,6 +853,16 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     return json({ ok: true });
   }
   if (path === "/api/pane/commands") return json({ commands: paneCommandRows(paneId) });
+  // an agent's commands in a folder before any pane runs it: the new workspace and tab dialogs' skill
+  // chips. The static rows the bridge would read for the agent are not bundled here; the skills are
+  if (path === "/api/agent/commands") {
+    if (method !== "GET") return error("method_not_allowed", "use GET", 400);
+    const agent = query.get("agent") ?? "";
+    if (agent === "") return error("missing_agent", "agent query parameter is required", 400);
+    const cwd = query.get("cwd") ?? "";
+    if (cwd !== "" && !cwd.startsWith("/home/demo") && !cwd.startsWith("~")) return error("invalid_cwd", "cwd must be an existing directory", 400);
+    return json({ commands: agentSkillRows(agent) });
+  }
   if (path === "/api/pane/scroll") {
     const body = method === "POST" ? await bodyOf(init, input) : {};
     const target = method === "POST" ? String(body["pane_id"] ?? "") : paneId;
@@ -1154,11 +1206,14 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   if (path === "/api/workspace/create") {
     const body = await bodyOf(init, input);
     const agent = (body["agent"] as { kind?: string } | null | undefined)?.kind ?? null;
+    const firstFault = firstMessageFault(body["first_message"], agent);
+    if (firstFault !== null) return error("invalid_first_message", firstFault, 400);
     const cwd = String(body["cwd"] ?? "/home/demo/new-project");
     const label = String(body["label"] ?? "") || cwd.split("/").pop() || "new";
     const made = createDemoWorkspace(cwd, label, agent);
     structureChanged();
-    return json(made);
+    if (typeof body["first_message"] !== "string") return json(made);
+    return json({ ...made, first_message: made.agent_started ? { id: queueFirstMessage(made.pane_id, body["first_message"]).id } : null });
   }
   if (path === "/api/tab/create") {
     const body = await bodyOf(init, input);
@@ -1167,6 +1222,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
     if (!workspace) return error("not_found", "no such workspace", 404);
     const launch = body["agent"] as { kind?: string; args?: unknown } | null | undefined;
     const agent = launch?.kind ?? null;
+    const firstFault = firstMessageFault(body["first_message"], agent);
+    if (firstFault !== null) return error("invalid_first_message", firstFault, 400);
     // a session resumed from the history dialog (`codex resume <id>`, `claude --resume <id>`: the id
     // last) is the one the new pane shows, as herdr reports a pane's session
     const resumed = agent !== null && Array.isArray(launch?.args) && launch.args.length === 2 && typeof launch.args[1] === "string" ? launch.args[1] : null;
@@ -1195,7 +1252,9 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
       setTimeout(() => { if (!replying.has(pane.pane_id)) finishDemoTurn(pane.pane_id, "idle"); }, 1500);
     }
     structureChanged();
-    return json({ workspace_id: id, pane_id: pane.pane_id, agent_started: agent !== null } satisfies WorkspaceCreated);
+    const made: WorkspaceCreated = { workspace_id: id, pane_id: pane.pane_id, agent_started: agent !== null };
+    if (typeof body["first_message"] !== "string") return json(made);
+    return json({ ...made, first_message: agent !== null ? { id: queueFirstMessage(pane.pane_id, body["first_message"]).id } : null });
   }
   // no key in the demo: the app falls back to the browser's own speech recognition
   if (path === "/api/voice") return json({ configured: false, source: null, ...VOICE_DEFAULTS } satisfies VoiceStatus, 200, { "cache-control": "no-store" });
@@ -1314,6 +1373,8 @@ class DemoSocket extends EventTarget {
   onerror: ((event: Event) => void) | null = null;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly attached = new Set<string>();
+  /** whether this socket has the pane attached: the bridge's first message is told to, and typed through, such a socket */
+  attachedTo(paneId: string): boolean { return this.attached.has(paneId); }
   private mode: "interact" | "observe" = "interact";
   /** Accepted messages belong to this live connection, never to a reconnect's empty queue. */
   private readonly pending = new Map<string, PendingMessage[]>();
@@ -1523,6 +1584,16 @@ class DemoSocket extends EventTarget {
             result(false, "invalid_pending_action"); break;
           }
           if (this.mode === "observe") { result(false, "read_only"); break; }
+          const first = firstMessages.get(message.pane_id);
+          if (first && first.id === message.pending_id && this.attached.has(message.pane_id)) {
+            // the pane's first message is every attached socket's to discard or send now
+            if (message.action === "discard") {
+              firstMessages.delete(message.pane_id);
+              publishFirstMessage(message.pane_id, [{ id: first.id, outcome: "discarded" }]);
+              result(true);
+            } else result(deliverFirstMessage(message.pane_id), ["idle", "done"].includes(paneOf(message.pane_id)?.agent_status ?? "") ? undefined : "agent_blocked");
+            break;
+          }
           const pending = this.pending.get(message.pane_id)?.find((item) => item.id === message.pending_id);
           if (!pending) {
             const receipt = this.outcomes.get(message.pending_id);
@@ -1674,6 +1745,15 @@ class DemoSocket extends EventTarget {
     this.attached.add(paneId);
     this.publishPending(paneId);
     this.push({ type: "input-ready", pane_id: paneId });
+    // the bridge's first message for the pane, told to this attaching socket; a pane already at rest gets it typed now.
+    // On its own tick: an attach sent in the open handler is answered here before this socket's snapshot goes out,
+    // and the client takes pending messages only after the snapshot, as a real bridge sends them
+    this.later(() => {
+      const first = firstMessages.get(paneId);
+      if (!first || !this.attached.has(paneId)) return;
+      this.push({ type: "pending-messages", pane_id: paneId, messages: [structuredClone(first)] });
+      if (["idle", "done"].includes(paneOf(paneId)?.agent_status ?? "")) deliverFirstMessage(paneId);
+    }, 0);
     const key = keyOfPane.get(paneId);
     if (histories.has(paneId)) { this.renderHistory(paneId); return; }
     if (key === "shell") {

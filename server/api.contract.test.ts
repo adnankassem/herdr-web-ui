@@ -949,6 +949,23 @@ describe("agent rename", () => {
     }
   });
 
+  it("answers the new-tab dialog's agent commands to another PC's registered bridge token", async () => {
+    const state = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-commands-bridge-"));
+    const bridge = createServer({ port: 0, hostname: "127.0.0.1", token: "test-browser-token", machines: false, registerBridge: true, stateDir: state, tailscaleOwner: null });
+    const registered = JSON.parse(readFileSync(descriptorPath(), "utf8")) as BridgeDescriptor;
+    const endpoint = `http://127.0.0.1:${bridge.port}`;
+    const manager = { endpoint: (id: string) => id === "commands-remote" ? { url: endpoint, token: registered.token } : null, trackTerminal: () => () => {} } as unknown as MachineManager;
+    try {
+      expect((await fetch(`${endpoint}/api/agent/commands?agent=claude`)).status).toBe(401);
+      const res = await handleMachineRequest(new Request("http://127.0.0.1/api/machines/commands-remote/agent/commands?agent=claude", { headers: { origin: "http://127.0.0.1" } }), manager);
+      expect(res.status).toBe(200);
+      expect(Array.isArray(((await res.json()) as { commands: unknown[] }).commands)).toBeTrue();
+    } finally {
+      bridge.stop();
+      rmSync(state, { recursive: true, force: true });
+    }
+  });
+
   it("validates the body before asking herdr", async () => {
     for (const [body, code] of [
       [{}, "missing_pane_id"],
@@ -1110,16 +1127,37 @@ describe("tab creation", () => {
     } finally { await workspaceClose(owned.workspace_id); }
   }, 20_000);
 
-  it("returns the created tab when a shell agent is unavailable", async () => {
+  it("refuses a first message without an agent, an empty, oversized or control-laden one, before anything is made", async () => {
+    const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-first-message" });
+    try {
+      const before = (await sessionSnapshot()).tabs.length;
+      for (const [body, reason] of [
+        [{ workspace_id: owned.workspace.workspace_id, agent: null, first_message: "a shell takes no message" }, "no agent"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "   " }, "blank"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "x".repeat(20_001) }, "too long"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "run \u001b[2J this" }, "control characters"],
+        [{ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: 42 }, "not a string"],
+      ] as const) {
+        const res = await post(body);
+        expect(res.status, reason).toBe(400);
+        expect(((await res.json()) as ApiError).error.code, reason).toBe("invalid_first_message");
+      }
+      expect((await sessionSnapshot()).tabs.length).toBe(before);
+    } finally {
+      await workspaceClose(owned.workspace.workspace_id);
+    }
+  });
+
+  it("returns the created tab when a shell agent is unavailable, and queues no first message for an agent that did not start", async () => {
     const owned = await workspaceCreate({ cwd: tmpdir(), label: "herdr-web-ui-test-tab-shell" });
     const bin = mkdtempSync(join(tmpdir(), "herdr-web-ui-tab-empty-path-"));
     const path = process.env["PATH"];
     try {
       process.env["PATH"] = bin;
-      const res = await post({ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" } });
+      const res = await post({ workspace_id: owned.workspace.workspace_id, agent: { kind: "gjc" }, first_message: "Plan the config file" });
       const failed = await res.json() as WorkspaceCreated;
       expect(res.status).toBe(200);
-      expect(failed).toMatchObject({ workspace_id: owned.workspace.workspace_id, agent_started: false, error: { code: "agent_start_failed" } });
+      expect(failed).toMatchObject({ workspace_id: owned.workspace.workspace_id, agent_started: false, error: { code: "agent_start_failed" }, first_message: null });
       expect(failed.error?.message).toContain("gjc is not on this server's PATH");
       expect(failed.pane_id).not.toBe(owned.root_pane.pane_id);
     } finally {
@@ -1211,6 +1249,42 @@ describe("workspace and discovery endpoints", () => {
       expect(crossSite.status).toBe(403);
       expect(existsSync(join(root, "from-elsewhere"))).toBeFalse();
       expect(existsSync(join(tmpdir(), "escape"))).toBeFalse();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists an agent's commands for a folder before any pane runs it, locally and through the PC proxy, and refuses what it must", async () => {
+    // GET /api/agent/commands?agent=&cwd=: paneCommands without a pane (the new workspace and tab
+    // dialogs' skill list). A fixture folder with one Codex project skill; the folder is its own
+    // repository boundary, so the scan climbs no further.
+    const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-agent-commands-"));
+    try {
+      mkdirSync(join(root, ".git"));
+      mkdirSync(join(root, ".codex", "skills", "contract-skill"), { recursive: true });
+      writeFileSync(join(root, ".codex", "skills", "contract-skill", "SKILL.md"), "---\nname: contract-skill\ndescription: A fixture skill.\n---\nBody.\n");
+      const query = `?agent=codex&cwd=${encodeURIComponent(root)}`;
+      const listed = await fetch(`${base()}/api/agent/commands${query}`);
+      expect(listed.status).toBe(200);
+      const { commands } = (await listed.json()) as { commands: { name: string; source: string; trigger?: string; origin?: string; provenance?: { verified: boolean } }[] };
+      expect(commands).toContainEqual(expect.objectContaining({ name: "contract-skill", source: "skill", trigger: "$", origin: "project" }));
+      expect(commands.some((command) => command.source === "builtin")).toBeTrue();
+      // no process runs the agent: no row is verified against a version
+      expect(commands.every((command) => command.provenance?.verified === false)).toBeTrue();
+      // the same answer for this PC through the proxy path the remote PCs use
+      const proxied = await fetch(`${base()}/api/machines/local/agent/commands${query}`);
+      expect(proxied.status).toBe(200);
+      expect(await proxied.json()).toEqual({ commands });
+      const refusals: Array<[string, RequestInit | undefined, string]> = [
+        ["", undefined, "missing_agent"],
+        [`?agent=codex&cwd=${encodeURIComponent(join(root, "missing"))}`, undefined, "invalid_cwd"],
+        ["?agent=codex", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }, "method_not_allowed"],
+      ];
+      for (const [refusedQuery, init, code] of refusals) {
+        const refused = await fetch(`${base()}/api/agent/commands${refusedQuery}`, init);
+        expect(refused.status).toBe(400);
+        expect(((await refused.json()) as ApiError).error.code).toBe(code);
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

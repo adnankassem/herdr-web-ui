@@ -17,6 +17,7 @@ export function useMachineApi() {
     rewindPane: (request: PaneRewindRequest) => api.rewindPane(request, id),
     uploadPaneImage: (pane: string, image: Blob) => api.uploadPaneImage(pane, image, id),
     fetchPaneCommands: (pane: string) => api.fetchPaneCommands(pane, id),
+    fetchAgentCommands: (agent: string, cwd: string | null) => api.fetchAgentCommands(agent, cwd, id),
     fetchPaneFiles: (pane: string, query: string, limit = 20) => api.fetchPaneFiles(pane, query, limit, id),
     findPane: (request: Parameters<typeof api.findPane>[0]) => api.findPane(request, id),
     fetchPaneScroll: (pane: string) => api.fetchPaneScroll(pane, id),

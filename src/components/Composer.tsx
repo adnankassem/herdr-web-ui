@@ -12,7 +12,7 @@ import {
   type ReactNode,
 } from "react";
 import { flushSync } from "react-dom";
-import { ArrowUp, FileText, Folder, FolderGit2, GitBranch, LoaderCircle, Minimize2, Package, Plus, Puzzle, Square, SquareTerminal, TriangleAlert, UserRound, X, type LucideIcon } from "lucide-react";
+import { ArrowUp, FileText, Folder, FolderGit2, GitBranch, LoaderCircle, MessageSquarePlus, Minimize2, Package, Plus, Puzzle, Square, SquareTerminal, TriangleAlert, UserRound, X, type LucideIcon } from "lucide-react";
 
 import "./Composer.css";
 
@@ -105,6 +105,9 @@ export interface ComposerProps {
   /** opens the folder's earlier sessions (SessionHistory): picking `resume` from the menu opens them, and the
    * terminal command's row offers them; none: the pane's PC cannot list them */
   onOpenHistory?: () => void;
+  /** opens the New tab dialog on this pane's workspace, to start another agent with its model, effort, skills
+   * and first message (NewSessionDialog); none: the pane has no workspace to add a tab to */
+  onOpenNewSession?: () => void;
   /** the pane's working folder, named in the strip tucked under the card; nothing is drawn for it while absent */
   cwd?: string | null;
   /** the pane's branch, beside the folder in that strip; nothing is drawn for it while absent */
@@ -250,6 +253,7 @@ export function Composer({
   role = "interact",
   onOpenTerminal,
   onOpenHistory,
+  onOpenNewSession,
   cwd = null,
   branch = null,
   worktreeRepo = null,
@@ -1394,6 +1398,19 @@ export function Composer({
             <Plus aria-hidden="true" />
           </button>
           {dictation.shown && <MicButton dictation={dictation} />}
+          {/* a mouse-driven window only, like the usage glance: a phone's card has no row to spare beside
+              the mic and the tasks chip, and its tab menu carries New tab with agent… already */}
+          {onOpenNewSession && role !== "observe" && !mobile && (
+            <button
+              type="button"
+              className="icon-button composer-new-session"
+              aria-label={t("New tab with an agent…")}
+              title={t("New tab with an agent…")}
+              onClick={onOpenNewSession}
+            >
+              <MessageSquarePlus aria-hidden="true" />
+            </button>
+          )}
           <BackgroundTasks paneId={paneId} count={backgroundTasks} omo={agent === "omo"} claude={agent === "claude"} plan={plan} />
         </div>
         {/* between the two control groups of the card's last row. The agent's name, its separator and the

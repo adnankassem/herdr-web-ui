@@ -481,6 +481,22 @@ export const JA: Record<string, string> = {
   "Starting {agent}… up to 60s": "{agent} を起動しています… 最大 60 秒",
   "Starting shell…": "シェルを起動しています…",
   "Directory not found": "ディレクトリが見つかりません",
+  // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
+  "model, effort": "モデル、推論レベル",
+  "Model": "モデル",
+  "Empty: the agent's own model.": "空のままならエージェント自身のモデルを使います。",
+  "One model name, without spaces.": "空白を含まないモデル名を一つ指定してください。",
+  "Effort": "推論レベル",
+  "Levels depend on the model.": "選べるレベルはモデルによって異なります。",
+  "First message": "最初のメッセージ",
+  "Optional": "任意",
+  "Sent to {agent} as it starts.": "{agent} の起動時に一緒に送ります。",
+  "Queued for {agent}'s first turn: sent once it is ready, shown as a pending message until then.": "{agent} の最初のターン用にキューに入れます。準備ができたら送信し、それまでは保留中のメッセージとして表示されます。",
+  "Add {skill} to the message": "メッセージに {skill} を追加",
+  "No skills for {agent} in this folder.": "このフォルダーに {agent} のスキルはありません。",
+  "Skills are listed once the directory exists.": "ディレクトリが存在するとスキルを一覧できます。",
+  "This PC's bridge does not list skills yet.": "この PC のブリッジはまだスキルを一覧できません。",
+  "New tab with an agent…": "エージェント付きの新しいタブ…",
 
   // ---- folder browser ----
   "Choose a folder": "フォルダーを選択",

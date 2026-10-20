@@ -206,7 +206,7 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *  POST   /api/workspace/create { cwd?, label?, agent?: { kind, name?, args? } }
  *         -> WorkspaceCreated (workspace.create, then agent.start in the root pane when `agent` is given;
  *         omo and gjc, which herdr cannot start, are typed into the root pane's shell)
- *  POST   /api/tab/create { workspace_id, cwd?, label?, agent?: { kind, name?, args? } }
+ *  POST   /api/tab/create { workspace_id, cwd?, label?, agent?: { kind, name?, args? }, first_message? }
  *         -> TabCreated (tab.create in that workspace, then the same agent launch in the tab's root
  *         pane; without cwd herdr uses the workspace's folder, without label the tab's number)
  *         Both creates trim `label`; a blank one counts as not given, one over MAX_LABEL_CHARS
@@ -864,6 +864,13 @@ export interface CreateWorkspaceRequest {
   cwd?: string | null;
   label?: string | null;
   agent?: { kind: string; name?: string; args?: string[] } | null;
+  /**
+   * the user's first message for the agent, sent by this request: the bridge queues it for the
+   * agent's first ready turn through its pending path (server/core/pending.ts), where the pane's
+   * connections see it as a pending message and may discard or send it now; needs `agent`, at most
+   * 20000 characters without terminal control characters
+   */
+  first_message?: string | null;
 }
 
 /** POST /api/tab/move: the boundary is counted BEFORE removing the source tab. */
@@ -956,6 +963,8 @@ export interface WorkspaceCreated {
   agent_started: boolean;
   /** The workspace still exists when its requested agent could not start. */
   error?: { code: string; message: string };
+  /** with `first_message` in the request: the pending message it was queued as, or null when the agent did not start */
+  first_message?: { id: string } | null;
 }
 
 /**

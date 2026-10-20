@@ -16,7 +16,7 @@ const fail = (code: string, message: string, status: number) => jsonResponse({ e
  * forwards, so such a path must be no route at all rather than "some other route".
  */
 export const nonCanonicalPath = (pathname: string): boolean => pathname.includes("//") || (pathname.length > 1 && pathname.endsWith("/")) || /%2f|%5c/i.test(pathname);
-export const MACHINE_PROXY_PATH = /^(?:session|sessions\/history|agents|integrations|pane\/(?:read|scroll|find|selection|conversation(?:\/image|\/tool-output)?|commands|files|omo-tasks|plan|prompt|prompt\/answer|rewind|input|keys|close|rename|image|split|zoom|swap|resize|clear|focus)|workspace\/(?:create|rename|move|close|directories|diff\/files|diff\/file)|worktree\/(?:create|list|open|remove)|tab\/(?:create|rename|close|move)|layout\/ratio|agent\/rename|plugins\/actions|plugin\/action|fs\/(?:stat|file|favicon))$/;
+export const MACHINE_PROXY_PATH = /^(?:session|sessions\/history|agents|integrations|pane\/(?:read|scroll|find|selection|conversation(?:\/image|\/tool-output)?|commands|files|omo-tasks|plan|prompt|prompt\/answer|rewind|input|keys|close|rename|image|split|zoom|swap|resize|clear|focus)|workspace\/(?:create|rename|move|close|directories|diff\/files|diff\/file)|worktree\/(?:create|list|open|remove)|tab\/(?:create|rename|close|move)|layout\/ratio|agent\/(?:rename|commands)|plugins\/actions|plugin\/action|fs\/(?:stat|file|favicon))$/;
 
 
 /**
@@ -125,8 +125,9 @@ export async function handleMachineRequest(request: Request, manager: MachineMan
     }
     if (parts.length === 1 && request.method === "DELETE") { manager.remove(id); return jsonResponse({ ok: true }); }
     const path = parts.slice(1).join("/");
-    // earlier sessions carry their first prompts: never asked for a watching device with the PC's credential
-    if (readOnly && path === "sessions/history") return fail("read_only", "this device can only watch", 403);
+    // earlier sessions carry their first prompts, and a folder's command files name what is in it (the new-tab
+    // dialog's agent commands): never asked for a watching device with the PC's credential
+    if (readOnly && (path === "sessions/history" || path === "agent/commands")) return fail("read_only", "this device can only watch", 403);
     if (MACHINE_PROXY_PATH.test(path)) {
       // a connection that may only watch is refused here as well as at the access check, by the same rule
       // (index.ts `mutating`): it writes nothing on another PC

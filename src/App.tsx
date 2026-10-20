@@ -1832,6 +1832,8 @@ export function App() {
                         onOpenTerminal={item ? () => { if (active && item.pane_id === selectedPaneId) setView("terminal"); else pickView(machineId, item.pane_id, "terminal"); } : undefined}
                         // /resume lists the pane's own agent's sessions, and only for an agent whose store is read
                         onOpenHistory={item && sessionHistoryAgent(item.agent) !== null ? () => actions.openSessionHistory({ machineId, workspaceId: item.workspace_id, agent: item.agent, scope: "pane" }) : undefined}
+                        // the composer's new-agent button: the New tab dialog on this pane's workspace, as the tab menu opens it
+                        onOpenNewSession={item ? () => actions.openNewTab({ machineId, workspaceId: item.workspace_id }) : undefined}
                         // the other half never takes the keyboard: a press in it makes it active first
                         active={active && itemActive}
                         // the paging shortcuts reach the selected pane of the active half only
@@ -1878,9 +1880,11 @@ export function App() {
         prefill={newPrefill}
         onDraft={setNewFields}
         onClose={closeNewSession}
-        onCreated={(paneId, agentStarted) => {
+        onCreated={(paneId, agentStarted, messageWaits = false) => {
           closeNewSession();
           if (agentStarted) actions.agentStarted(newSessionMachineId, paneId);
+          // the first message waits in the chat's box: the pane opens on it, whatever lens the page would pick
+          if (messageWaits) pickView(newSessionMachineId, paneId, "chat");
           selectTarget(newSessionMachineId, paneId);
           void load();
         }}

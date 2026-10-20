@@ -479,6 +479,22 @@ export const KO: Record<string, string> = {
   "Starting {agent}… up to 60s": "{agent} 시작 중… 최대 60초",
   "Starting shell…": "셸 시작 중…",
   "Directory not found": "폴더를 찾을 수 없습니다",
+  // the launch's model, effort, first message and skills (lib/agentLaunchMode.ts, lib/newSession.ts)
+  "model, effort": "모델, 노력 수준",
+  "Model": "모델",
+  "Empty: the agent's own model.": "비우면 에이전트 자체 모델을 씁니다.",
+  "One model name, without spaces.": "띄어쓰기 없는 모델 이름 하나를 적으세요.",
+  "Effort": "노력 수준",
+  "Levels depend on the model.": "고를 수 있는 수준은 모델에 따라 다릅니다.",
+  "First message": "첫 메시지",
+  "Optional": "선택",
+  "Sent to {agent} as it starts.": "{agent}가 시작할 때 함께 보냅니다.",
+  "Queued for {agent}'s first turn: sent once it is ready, shown as a pending message until then.": "{agent}의 첫 턴에 보낼 메시지로 대기합니다. 준비되면 보내고, 그때까지 대기 중인 메시지로 표시됩니다.",
+  "Add {skill} to the message": "메시지에 {skill} 넣기",
+  "No skills for {agent} in this folder.": "이 폴더에는 {agent} 스킬이 없습니다.",
+  "Skills are listed once the directory exists.": "폴더가 있어야 스킬을 보여 줄 수 있습니다.",
+  "This PC's bridge does not list skills yet.": "이 PC의 브리지는 아직 스킬 목록을 제공하지 않습니다.",
+  "New tab with an agent…": "에이전트와 함께 새 탭…",
 
   // ---- folder browser ----
   "Choose a folder": "폴더 선택",

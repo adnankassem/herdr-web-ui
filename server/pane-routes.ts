@@ -11,6 +11,7 @@ import { paneFiles } from "./files.ts";
 import { badRequest, conflictResponse, errorResponse, isCount, isJsonObject, jsonResponse, readJsonObject } from "./http.ts";
 import { conversationImage, ConversationUnavailable, forgetPaneTranscriptState, HistoryChanged, paneConversation, paneProcessRoots, paneTranscript, toolOutput } from "./conversation.ts";
 import { OPENCODE_TOOL_REF } from "./opencode.ts";
+import { openCodeInstalledVersion } from "./opencode-service.ts";
 import { DevinHistoryChanged } from "./devin.ts";
 import { GjcSdkLookupError } from "./gjc-sdk.ts";
 import { agentRename, HerdrError, layoutSetSplitRatio, paneClear, paneClose, paneFind, paneFocus, paneRead, paneRename, paneResize, paneScroll, paneScrollInfo, paneSelectionRead, paneSendKeys, paneSendText, paneSplit, paneSwap, paneSwapWith, paneZoom } from "./herdr/client.ts";
@@ -19,6 +20,7 @@ import { PasteImageError, readImageBody, savePaneImage } from "./paste.ts";
 import { handleRewindRequest } from "./rewind.ts";
 import { CLAUDE_REWIND_OPEN_MESSAGE } from "./dialogs/claude.ts";
 import { claudeRewindOpen } from "./prompt.ts";
+import { expandedDirectory } from "./workspace-routes.ts";
 
 /** the native stores createServer was given; unset, each reader finds its own */
 export type PaneStores = { codexHome?: string; grokHome?: string; opencodeDb?: string; devinDbPath?: string; hermesHome?: string; openCodeStateDir?: string };
@@ -59,6 +61,26 @@ export async function handlePaneRequest(request: Request, url: URL, pathname: st
     try {
       await agentRename(payload.pane_id, payload.name);
       return jsonResponse({ ok: true });
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }
+
+  // The commands an agent would offer in a folder before any pane runs it (the new workspace and
+  // tab dialogs list its skills): the same rows GET /api/pane/commands gives a pane, read from the
+  // bridge's own tables and a scan of the folder and home. No process exists, so nothing is asked
+  // of an agent binary (the catalog's convention), no process roots refine the scan, and no row is
+  // verified against a running version.
+  if (pathname === "/api/agent/commands") {
+    if (request.method !== "GET") return badRequest("method_not_allowed", "use GET");
+    const agent = url.searchParams.get("agent");
+    if (!agent) return badRequest("missing_agent", "agent query parameter is required");
+    const directory = (url.searchParams.get("cwd") ?? "").trim();
+    const cwd = directory === "" ? null : expandedDirectory(directory);
+    if (directory !== "" && cwd === null) return badRequest("invalid_cwd", "cwd must be an existing directory");
+    try {
+      // OpenCode types its skills one way per version: before any pane runs it, its service file says which
+      return jsonResponse({ commands: paneCommands(agent, cwd, undefined, undefined, agent === "opencode" ? openCodeInstalledVersion(options.openCodeStateDir) : undefined) });
     } catch (error) {
       return errorResponse(error);
     }

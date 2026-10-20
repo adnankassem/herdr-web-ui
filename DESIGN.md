@@ -1182,6 +1182,50 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   dashed box (`.new-session-folder`: a worktree's checkout, else the folder of the pane in front)
   instead of asking for one, and its name is the tab's (optional; the placeholder is the number
   herdr gives it). Submit calls `POST /api/tab/create` with the same agent launch.
+- Under Name, the launch's own choices, each only where the agent's CLI documents it
+  (`lib/agentLaunchMode.ts` launchCapabilities; today Claude Code and Codex): **Model**, a `.input`
+  whose empty value is the agent's own and whose datalist offers the aliases the agent documents
+  (`sonnet`, `opus`, `haiku`), and **Effort**, a `.select` of the agent's documented levels after
+  **Agent default**, the two side by side (`.new-session-launch`, stacked where a column would fall
+  under 9rem). A model that is not one word, or a choice the picked agent's launch does not take,
+  disables Start and says so under its field in the blocked colour (`aria-invalid`, `role="alert"`);
+  picking another agent drops the choices its launch does not take. The agent picker's rows carry a
+  `.menu-item-hint` (**model, effort**) beside the agents whose launch takes them.
+- **First message** is a `.input` textarea (three rows, grown by hand) whose hint says where it goes.
+  Codex takes it as its own positional argument behind `--` (`codex [OPTIONS] [PROMPT]`; clap matches
+  a subcommand only before the separator, verified on codex 0.163.0: `codex -- logout` starts the TUI),
+  so it starts with the agent. Claude Code's parser runs a subcommand named by the first operand even
+  after `--` (`claude -- update` ran the updater on 2.1.304), so it and every other agent start bare
+  and the text rides on the create request as `first_message`: the bridge queues it as its own pending
+  message for the pane (`server/core/pending.ts` FIRST_MESSAGE_OWNER), told to every connection that
+  attaches the pane (a reload or another lens included) as a **Next turn** pending message with
+  Discard and Send now, and typed once, through an attached connection, when the agent is first ready,
+  with the queued path's own checks (a draft in Claude's box holds it with `input_draft`; a replaced
+  agent holds it with `pending_target_changed`). The page never types it: no draft, no auto-send.
+  Under the message, **Skills**: the agent's skills in the folder before any process exists
+  (`GET /api/agent/commands?agent=&cwd=`, the pane commands route without a pane: the bridge's
+  tables and a disk scan, no agent started; a device that may only watch is refused it as it is a
+  directory listing and a file read), as mono `.btn` chips with `--radius-pill` that wrap to
+  three rows and then scroll, each the token the agent types (`$review-pr` for Codex, `/review-pr`
+  elsewhere, `@name` where that is the trigger) with the skill's description as its tooltip; a tap
+  puts the token at the message's caret, spaced, and focuses the box. An empty list says **No skills
+  for Codex in this folder.**; a folder not there yet, or a PC whose bridge is from before the
+  route, is said in one hint line. Start sends exactly one create: a ref-held in-flight guard
+  (`lib/sessionHistory.ts` inFlightGuard) refuses a second press before the disabled fields have
+  rendered.
+- In a mouse-driven window the chat's composer has a **New tab with an agent…** icon button (lucide
+  `MessageSquarePlus`, beside Attach) that opens this dialog as New tab on the pane's workspace, as
+  the tab menu does; a phone's card has no row to spare for it beside the mic and the tasks chip
+  (the model label would lose its pill), so there the tab's own menu keeps **New tab with agent…**.
+  The existing shortcuts are untouched.
+- The design follows the Codex app's new thread screen (the model and reasoning-effort pickers
+  under the prompt box, the prompt sent as the thread starts) and Claude Code's own session flags
+  (`--model`, `--effort`, the positional prompt): here they are fields of the existing dialog, not a
+  second launcher, because the dialog already owns the agent, the folder and the launch; the skills
+  row is the composer's `/` and `$` menu brought forward to before the agent runs, as chips because
+  a dialog has no caret to complete at until the message is typed.
+- The browser demo answers `GET /api/agent/commands` with a few fictional skills per agent (`$` ones
+  for Codex) and records nothing: a tab started from it is the demo's own new pane.
 
 ### Tab strip and pane canvas
 - The tab strip is shown even for one pane, as herdr's TUI shows its single tab and `+`. The `+`

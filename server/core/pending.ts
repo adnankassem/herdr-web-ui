@@ -4,6 +4,13 @@
  * checked again before every write, so a message is typed only into the attach it was sent from
  * while that connection may still type. A turn's end sends the pane's next message; losing the
  * lease holds it for the sender to review instead of sending it.
+ *
+ * A create request's first message (POST /api/workspace/create and /api/tab/create `first_message`)
+ * is the exception to the connection's ownership: the request itself was the user's send, so the
+ * bridge owns it (FIRST_MESSAGE_OWNER), a connection's loss never holds it, and when the pane's
+ * agent is first ready it is typed through whichever interact connection has the pane attached,
+ * with the same checks as that connection's own queued messages. Every connection attached to the
+ * pane sees it among its pending messages and may discard or send it now.
  */
 import { closeMention, type createSubmitText, freeClaudeBox, freeHermesInput, InputDraftError, pendingFault, pendingIdentity, pendingText } from "./composer.ts";
 import { type Client, connectionOf, send } from "./connections.ts";
@@ -27,8 +34,18 @@ import { herdrSkillAttachIo, type PromptPiece, typeWithSkills } from "../opencod
 type Frame<T extends ClientMessage["type"]> = Extract<ClientMessage, { type: T }>;
 
 type PendingLease = { sighting: TerminalSighting; authority: object };
-type PendingItem = PendingRecord<Client, PendingLease>;
+/** The bridge, as the owner of the first messages create requests queued for new panes' agents. */
+export type FirstMessageOwner = { readonly firstMessages: true };
+export const FIRST_MESSAGE_OWNER: FirstMessageOwner = { firstMessages: true };
+export type PendingOwner = Client | FirstMessageOwner;
+const isClient = (owner: PendingOwner): owner is Client => owner !== FIRST_MESSAGE_OWNER;
+/** a first message's lease is the delivering connection's, taken at each attempt: none is kept on the record */
+type PendingItem = PendingRecord<PendingOwner, PendingLease | null>;
 type SubmitReply = { ok: boolean; pending?: PendingMessage; code?: string; message?: string };
+/** a first message refused before anything was typed because no connection could type it stays queued for the next attach or turn */
+const FIRST_MESSAGE_RETRY_CODES = new Set(["input_not_ready", "pending_lease_lost", "disconnected", "read_only"]);
+/** receipts of first messages kept per pane, so a connection that attaches later drops a stale copy */
+const FIRST_MESSAGE_RECEIPTS = 8;
 
 /**
  * The server's pending messages. `authorizeSocket`, `clientSnapshot` and `omo` belong to the
@@ -51,9 +68,24 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
   TYPED_SETTLE_MS: number;
 }) {
   const pendingAuthorities = new WeakMap<Client, Map<string, object>>();
-  const pending = new PendingInputs<Client, PendingLease>((owner, paneId, messages, removed) => {
-    send(owner, { type: "pending-messages", pane_id: paneId, messages, ...(removed ? { removed } : {}) });
+  const firstReceipts = new Map<string, Array<{ id: string; outcome: "sent" | "discarded" }>>();
+  /** the connections that could type into the pane now: attached, allowed to type, and with a ready lease */
+  const typists = (paneId: string): Client[] => [...clients].filter((client) => {
+    if (!client.data.attached.has(paneId)) return false;
+    try { authorizeSocket(client); } catch { return false; }
+    return typingGuards.pendingLease(sight(client, paneId).facts());
+  });
+  const pending = new PendingInputs<PendingOwner, PendingLease | null>((owner, paneId, messages, removed) => {
+    if (isClient(owner)) { send(owner, { type: "pending-messages", pane_id: paneId, messages, ...(removed ? { removed } : {}) }); return; }
+    // a first message: every connection attached to the pane sees it, and keeps the receipt once it went
+    if (removed) firstReceipts.set(paneId, [...(firstReceipts.get(paneId) ?? []), ...removed].slice(-FIRST_MESSAGE_RECEIPTS));
+    for (const client of clients) {
+      if (client.data.attached.has(paneId) && connectionOf(client).mode !== "observe") send(client, { type: "pending-messages", pane_id: paneId, messages, ...(removed ? { removed } : {}) });
+    }
   }, Date.now, options.pendingStartTimeoutMs);
+  let nextFirstRequestId = -1;
+  /** first messages still bound to the launched kind alone (queueFirstMessage, bindLaunched) */
+  const launchBound = new WeakSet<PendingItem>();
   const pendingDrains = new Set<string>();
   const pendingRequests = new WeakMap<Client, PendingRequestBook<SubmitReply>>();
   // the last input_draft refusal per pane: its named draft (Clear it and send), or none (Send anyway)
@@ -80,6 +112,14 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
   function holdPendingPane(paneId: string, fault: { code: string; message: string }): void {
     for (const owner of clients) pendingAuthorities.get(owner)?.delete(paneId);
     pending.holdPane(paneId, fault);
+    // a pane that ended takes its first messages with it: nothing is left to type them into, and no connection closes to expire them
+    if (fault.code === "pane_not_found") {
+      for (const message of pending.list(FIRST_MESSAGE_OWNER, paneId)) {
+        const item = pending.get(FIRST_MESSAGE_OWNER, paneId, message.id);
+        if (item) pending.discard(item);
+      }
+      firstReceipts.delete(paneId);
+    }
   }
   function authorizePending(owner: Client, paneId: string, lease: PendingLease): void {
     authorizeSocket(owner);
@@ -89,8 +129,8 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
     if (facts.currentHeld) throw new HerdrError("attach_held", ATTACH_HELD_MESSAGE);
     if (!typingGuards.pendingLease(facts)) throw new HerdrError("input_not_ready", "The pending message's pane connection changed");
   }
-  async function pendingContext(owner: Client, paneId: string, lease: PendingLease, identity?: PendingIdentity, pasted = false): Promise<{ pane: HerdrPane; identity: PendingIdentity; working: boolean; screen: string }> {
-    authorizePending(owner, paneId, lease);
+  /** The pane and the identity of what runs in it now, as a pending message is checked against them. */
+  async function currentIdentity(paneId: string): Promise<{ pane: HerdrPane; identity: PendingIdentity }> {
     // The same normalized snapshot the client sees includes a known Codex finish that
     // herdr reports as unknown. Nothing is inferred from a bare unknown state.
     const pane = (await clientSnapshot()).panes.find((candidate) => candidate.pane_id === paneId);
@@ -98,12 +138,16 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
     const info = await paneProcessInfo(paneId);
     const pid = info?.foreground_processes?.[0]?.pid ?? null;
     const base = pendingIdentity(pane);
-    const current: PendingIdentity = {
+    return { pane, identity: {
       ...base, processPid: pid, processBirth: pid === null ? null : processStartedAt(pid),
       omoSession: omo.sessionOf(paneId)?.sessionId ?? null,
       // Claude's own PID record says which session it runs, also without herdr's hook
       claudeSession: base.agent === "claude" ? await claudeForegroundSession(info?.foreground_processes ?? []) : null,
-    };
+    } };
+  }
+  async function pendingContext(owner: Client, paneId: string, lease: PendingLease, identity?: PendingIdentity, pasted = false): Promise<{ pane: HerdrPane; identity: PendingIdentity; working: boolean; screen: string }> {
+    authorizePending(owner, paneId, lease);
+    const { pane, identity: current } = await currentIdentity(paneId);
     if (identity && !samePendingIdentity(identity, current)) {
       throw new HerdrError("pending_target_changed", "The pane's terminal or agent session changed; review the message before sending it again");
     }
@@ -166,7 +210,9 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
       // read comes after the colors, so text typed between the two is in the box and holds the message.
       if (context.identity.agent === "claude") await freeClaudeBox(paneId, context.working, () => authorizePending(owner, paneId, lease), arrivedAt + (options.submitDeadlineMs ?? SUBMIT_DEADLINE_MS));
       else if (context.identity.agent === "hermes") context.screen = await freeHermesInput(paneId, context.identity);
-      // OpenCode v2 attaches a skill only through its autocomplete, never from a paste
+      // OpenCode v2 attaches a skill only through its autocomplete, never from a paste. A first message
+      // goes before any Chat read the pane's catalog: the cold send's catalog (bounded reads, within the
+      // catalog budget, at the pane's own version) is openCodeSkillsToType's, as for any other send
       const opencode = await openCodeSkillsToType(context.pane, prepareCommandSend(context.pane, text, context.screen), text, context.screen, options.openCodeStateDir);
       let command = opencode.sent;
       const skills = opencode.skills;
@@ -242,27 +288,96 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
       return { ok: false, ...fault };
     }
   }
-  async function dispatchPending(item: PendingItem, automatic: boolean, arrivedAt: number, interruptWorkingCodex = false): Promise<SubmitReply> {
-    const reply = await dispatchPendingText(item.owner, item.paneId, item.message.text, item.lease, item.identity,
-      automatic, arrivedAt, (working, restarting) => pending.committing(item, working, restarting), interruptWorkingCodex);
-    pending.settle(item, reply.ok ? undefined : { code: reply.code!, message: reply.message! }, reply.code === "submit_changed",
-      automatic && ["pending_wait", "agent_blocked"].includes(reply.code ?? ""));
+  /**
+   * `by`: the connection that types the message, the owner's own for a connection's message; for a
+   * first message whichever typist the caller found, whose lease is taken here for this attempt alone.
+   */
+  async function dispatchPending(item: PendingItem, automatic: boolean, arrivedAt: number, interruptWorkingCodex = false, by: Client | null = isClient(item.owner) ? item.owner : null): Promise<SubmitReply> {
+    let reply: SubmitReply;
+    try {
+      if (by === null) throw new HerdrError("input_not_ready", "No connection has the pane attached to type the message");
+      const lease = item.lease ?? pendingLease(by, item.paneId);
+      reply = await dispatchPendingText(by, item.paneId, item.message.text, lease, item.identity,
+        automatic, arrivedAt, (working, restarting) => pending.committing(item, working, restarting), interruptWorkingCodex);
+    } catch (error) {
+      reply = { ok: false, ...pendingFault(error) };
+    }
+    const code = reply.code ?? "";
+    // a first message no connection could type stays queued: the next attach or turn tries again
+    const retry = automatic && (["pending_wait", "agent_blocked"].includes(code) || (!isClient(item.owner) && FIRST_MESSAGE_RETRY_CODES.has(code)));
+    pending.settle(item, reply.ok ? undefined : { code: reply.code!, message: reply.message! }, reply.code === "submit_changed", retry);
     return reply;
   }
   function drainPending(paneId: string): void {
     if (pendingDrains.has(paneId) || pending.next(paneId) === null) return;
     pendingDrains.add(paneId);
     const arrivedAt = Date.now();
+    // drained again only after a dispatch: a message no connection can type yet waits for the next
+    // attach, readiness or status event, where draining again at once would spin the event loop
+    let dispatched = false;
     void serialize(paneId, async () => {
       const item = pending.next(paneId);
-      if (item && pending.claim(item, true)) await dispatchPending(item, true, arrivedAt);
+      if (!item) return;
+      // a first message waits for a connection that can type it; a connection's own message has its owner
+      const by = isClient(item.owner) ? item.owner : typists(paneId)[0] ?? null;
+      if (by === null) return;
+      // a launched agent herdr does not name yet is waited for: its next status event drains again
+      if (await bindLaunched(item) === "wait") return;
+      if (!pending.claim(item, true)) return;
+      dispatched = true;
+      await dispatchPending(item, true, arrivedAt, false, by);
     }).catch((error) => console.warn("pending message:", pendingFault(error).code)).finally(() => {
       pendingDrains.delete(paneId);
-      drainPending(paneId);
+      if (dispatched) drainPending(paneId);
     });
   }
+  /**
+   * A create request's first message for the pane's agent, queued as the request's own send: typed
+   * once the agent is ready, by a connection that has the pane attached (drainPending), and listed
+   * to every such connection. Refused as a submit frame's text would be.
+   */
+  async function queueFirstMessage(paneId: string, raw: string, kind: string): Promise<PendingMessage> {
+    const text = pendingText(raw);
+    const message = await serialize(paneId, async () => {
+      // bound to the terminal and the kind launched there: right after the launch herdr names no agent
+      // in the pane yet, and its process and session are the shell's or none (bindLaunched)
+      const { pane } = await currentIdentity(paneId);
+      const item = pending.enqueue(FIRST_MESSAGE_OWNER, paneId, nextFirstRequestId--, text, null, { agent: kind, terminalId: pane.terminal_id, session: null });
+      launchBound.add(item);
+      return item.message;
+    });
+    drainPending(paneId);
+    return { ...message };
+  }
+  /**
+   * A first message's binding to what runs in its pane, settled at its first dispatch: once herdr names
+   * the launched kind in the same terminal, the message takes that agent's whole identity (process,
+   * session) and is checked against it from then on ("bound"); while herdr names no agent there yet it
+   * waits ("wait"). Another agent or another terminal is left to pendingContext, which holds the message
+   * with pending_target_changed: it is never typed into what was not launched for it.
+   */
+  async function bindLaunched(item: PendingItem): Promise<"bound" | "wait"> {
+    if (!launchBound.has(item)) return "bound";
+    const { identity } = await currentIdentity(item.paneId);
+    if (identity.terminalId !== item.identity.terminalId) return "bound";
+    if (identity.agent === null) return "wait";
+    if (identity.agent === item.identity.agent) {
+      item.identity = identity;
+      launchBound.delete(item);
+    }
+    return "bound";
+  }
+  /** A connection that attached the pane: it sees the pane's first messages and their receipts, and may be the one to type them. */
+  function attached(client: Client, paneId: string): void {
+    const messages = pending.list(FIRST_MESSAGE_OWNER, paneId);
+    const removed = firstReceipts.get(paneId) ?? [];
+    if ((messages.length > 0 || removed.length > 0) && connectionOf(client).mode !== "observe") {
+      send(client, { type: "pending-messages", pane_id: paneId, messages, ...(removed.length > 0 ? { removed } : {}) });
+    }
+    drainPending(paneId);
+  }
   function replayPendingOutcome(owner: Client, paneId: string, id: string): boolean {
-    const outcome = pending.outcome(owner, paneId, id);
+    const outcome = pending.outcome(owner, paneId, id) ?? pending.outcome(FIRST_MESSAGE_OWNER, paneId, id);
     if (!outcome) return false;
     send(owner, { type: "pending-messages", pane_id: paneId, messages: pending.list(owner, paneId), removed: [{ id, outcome }] });
     return true;
@@ -399,7 +514,9 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
         const answer = await serialize(message.pane_id, async (): Promise<SubmitReply> => {
           authorizeSocket(client);
           if (!clients.has(client) || connectionOf(client).closing) throw new HerdrError("disconnected", "This connection closed");
-          const item = pending.get(client, message.pane_id, message.pending_id);
+          // a pane's first message is every attached connection's to send now or discard
+          const item = pending.get(client, message.pane_id, message.pending_id)
+            ?? (client.data.attached.has(message.pane_id) ? pending.get(FIRST_MESSAGE_OWNER, message.pane_id, message.pending_id) : undefined);
           if (!item) return replayPendingOutcome(client, message.pane_id, message.pending_id)
             ? { ok: true } : { ok: false, code: "pending_not_found", message: "This pending message does not belong to this connection" };
           if (message.action === "discard") return pending.discard(item) ? { ok: true } : { ok: false, code: "pending_busy", message: "This message is already being sent" };
@@ -408,11 +525,12 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
           const reply = await pending.resend(item.paneId, item.message.id,
             new Bun.CryptoHasher("sha256").update(item.message.text).digest("hex"), async (): Promise<SubmitReply> => {
               try {
+                if (await bindLaunched(item) === "wait") return { ok: false, code: "input_not_ready", message: "The agent started for this message is not up yet" };
                 await pendingContext(client, item.paneId, lease!, item.identity);
                 if (!pending.claim(item, false)) return { ok: false, code: "pending_busy", message: "This message is already being sent" };
-                item.lease = lease!;
+                if (isClient(item.owner)) item.lease = lease!;
                 dispatched = true;
-                return await dispatchPending(item, false, arrivedAt, true);
+                return await dispatchPending(item, false, arrivedAt, true, client);
               } catch (error) { return { ok: false, ...pendingFault(error) }; }
             }, message.resend_generation);
           // A saved copy may already have completed this ID on another connection.
@@ -427,5 +545,5 @@ export function createPendingDelivery({ options, clients, attachments, sight, se
     },
   };
 
-  return { pending, holdPending, holdPendingPane, drainPending, pendingFrames };
+  return { pending, holdPending, holdPendingPane, drainPending, pendingFrames, queueFirstMessage, attached };
 }

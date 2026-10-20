@@ -130,6 +130,8 @@ export interface PaneTerminalProps {
   onOpenTerminal?: () => void;
   /** opens the folder's earlier sessions for the pane's agent (App's SessionHistory): the composer's /resume */
   onOpenHistory?: () => void;
+  /** opens the New tab dialog on the pane's workspace (App's NewSessionDialog): the composer's new-agent button */
+  onOpenNewSession?: () => void;
   findRequest?: number;
   controls?: { current: PaneControls | null };
   /** Only the selected tile may take keyboard focus after async work or a lens change. */
@@ -195,6 +197,7 @@ export function PaneTerminal({
   role = "interact",
   onOpenTerminal,
   onOpenHistory,
+  onOpenNewSession,
   onRoleAck,
   onConnectionChange,
   onServerMessage,
@@ -3127,6 +3130,7 @@ export function PaneTerminal({
           role={observing ? "observe" : role}
           onOpenTerminal={onOpenTerminal}
           onOpenHistory={historyOffered ? onOpenHistory : undefined}
+          onOpenNewSession={onOpenNewSession}
           greeting={greetingDue ? (
             <div className={`composer-greeting${greeted ? "" : " is-out"}`} ref={greetingRef} aria-hidden={greeted ? undefined : true}>
               <p className="composer-greeting-title">{t("What should {agent} do in {folder}?", { agent: agentDisplayLabel(agent), folder })}</p>

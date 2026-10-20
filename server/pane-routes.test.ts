@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { paneCommands } from "./commands.ts";
@@ -8,6 +8,7 @@ import { registry } from "./dialogs/registry.ts";
 import { findLastIndex } from "./dialogs/shared.ts";
 import { handlePaneRequest } from "./pane-routes.ts";
 import { paneAgentOf, resolveAgent } from "./pane-context.ts";
+import { openCodeServiceOptions } from "./opencode-service.ts";
 
 // The real RPC client against a unix socket this test owns; only herdr's answers are synthetic.
 let root: string;
@@ -117,6 +118,99 @@ it("reflects a /reload-skills typed in Hermes's own terminal on the next command
     skill("typed-reload-skill");
     expect(await names()).toContain("typed-reload-skill");
   });
+});
+
+it("lists an agent's commands for a folder with no pane, from the folder's skills and the static tables alone", async () => {
+  const homeBefore = process.env["HOME"];
+  // the user's own skills stay out of the answer: a HOME of the test's own
+  process.env["HOME"] = join(root, "home");
+  mkdirSync(join(root, "home"), { recursive: true });
+  try {
+    const project = join(root, "project");
+    mkdirSync(join(project, ".codex", "skills", "fixture-skill"), { recursive: true });
+    writeFileSync(join(project, ".codex", "skills", "fixture-skill", "SKILL.md"), "---\nname: fixture-skill\ndescription: A fixture skill.\n---\nBody.\n");
+    const ask = async (query: string, method = "GET") => {
+      const url = new URL(`http://x/api/agent/commands${query}`);
+      return (await handlePaneRequest(new Request(url, { method }), url, "/api/agent/commands", {}))!;
+    };
+    // no herdr RPC answers this route: the fake socket above would throw for one
+    const listed = await ask(`?agent=codex&cwd=${encodeURIComponent(project)}`);
+    expect(listed.status).toBe(200);
+    const { commands } = (await listed.json()) as { commands: { name: string; source: string; trigger?: string; origin?: string; provenance?: { transport: string; verified: boolean } }[] };
+    expect(commands.filter((command) => command.source === "skill")).toMatchObject([{ name: "fixture-skill", source: "skill", trigger: "$", origin: "project", provenance: { transport: "scan", verified: false } }]);
+    expect(commands.some((command) => command.source === "builtin")).toBeTrue();
+    // no process, no version: no row is verified against one
+    expect(commands.every((command) => command.provenance?.verified === false)).toBeTrue();
+    // the folder is optional; an agent the bridge has no tables for has no rows
+    expect(await (await ask("?agent=nonesuch")).json()).toEqual({ commands: [] });
+    const missingAgent = await ask("");
+    expect(missingAgent.status).toBe(400);
+    expect(((await missingAgent.json()) as { error: { code: string } }).error.code).toBe("missing_agent");
+    const missingFolder = await ask(`?agent=codex&cwd=${encodeURIComponent(join(root, "missing"))}`);
+    expect(missingFolder.status).toBe(400);
+    expect(((await missingFolder.json()) as { error: { code: string } }).error.code).toBe("invalid_cwd");
+    expect((await ask("?agent=codex", "POST")).status).toBe(400);
+  } finally {
+    if (homeBefore === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = homeBefore;
+  }
+});
+
+it("lists OpenCode's skills for a folder with no pane in the form its installed version types them", async () => {
+  const homeBefore = process.env["HOME"];
+  process.env["HOME"] = join(root, "home");
+  mkdirSync(join(root, "home"), { recursive: true });
+  try {
+    const project = join(root, "project");
+    mkdirSync(join(project, ".opencode", "skills", "effect"), { recursive: true });
+    writeFileSync(join(project, ".opencode", "skills", "effect", "SKILL.md"), "---\nname: effect\ndescription: Apply Effect.\n---\nBody.\n");
+    const state = join(root, "opencode-state");
+    mkdirSync(state, { recursive: true });
+    // the server's own OpenCode state (createServer's openCodeStateDir), not the process-wide default
+    const skill = async () => {
+      const url = new URL(`http://x/api/agent/commands?agent=opencode&cwd=${encodeURIComponent(project)}`);
+      const { commands } = await (await handlePaneRequest(new Request(url), url, "/api/agent/commands", { openCodeStateDir: state }))!.json() as { commands: { name: string; source: string; trigger?: string }[] };
+      return commands.find((command) => command.name === "effect");
+    };
+    openCodeServiceOptions.stateDir = join(root, "elsewhere");
+    // no OpenCode 2 has written its service file: the v1 form
+    const v1 = await skill();
+    expect(v1?.source).toBe("skill");
+    expect(v1?.trigger ?? "/").toBe("/");
+    // OpenCode 2.0.32 names its version in service.json: its skills are typed with @
+    writeFileSync(join(state, "service.json"), JSON.stringify({ url: "http://127.0.0.1:9", pid: process.pid, password: "fixture", version: "2.0.32" }));
+    expect(await skill()).toMatchObject({ source: "skill", trigger: "@" });
+  } finally {
+    delete openCodeServiceOptions.stateDir;
+    if (homeBefore === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = homeBefore;
+  }
+});
+
+it("answers OpenCode's commands for a folder with no pane while its opencode.json is a FIFO no one writes", async () => {
+  const homeBefore = process.env["HOME"];
+  process.env["HOME"] = join(root, "home");
+  mkdirSync(join(root, "home"), { recursive: true });
+  const project = join(root, "fifo-project");
+  mkdirSync(project, { recursive: true });
+  const fifo = join(project, "opencode.json");
+  expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+  // the writer comes long after the answer should: a read that blocks on the FIFO could only return once
+  // the writer opened it, after it marks `opening`
+  const opening = join(root, "fifo-opening");
+  const writer = Bun.spawn(["sh", "-c", `sleep 20; touch '${opening}'; printf '{}' > '${fifo}'`]);
+  try {
+    const url = new URL(`http://x/api/agent/commands?agent=opencode&cwd=${encodeURIComponent(project)}`);
+    const response = (await handlePaneRequest(new Request(url), url, "/api/agent/commands", { openCodeStateDir: join(root, "no-opencode-state") }))!;
+    expect(existsSync(opening)).toBe(false);
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as { commands: unknown[] }).commands.length).toBeGreaterThan(0);
+  } finally {
+    writer.kill();
+    rmSync(fifo, { force: true });
+    if (homeBefore === undefined) delete process.env["HOME"];
+    else process.env["HOME"] = homeBefore;
+  }
 });
 
 it("resolves a pane with no agent to null and its commands route to []", async () => {
