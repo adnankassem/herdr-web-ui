@@ -63,9 +63,17 @@ export async function checkTerminalInputSpacing(browser: Browser, origin: string
           });
           return {
             line: { top: line.top + 1, bottom: line.bottom }, text: box(".terminal-input-text"), send: box(".terminal-input-send"),
-            bar: { top: bar.top, bottom: bar.bottom - barPadding }, keys,
+            bar: { top: bar.top, bottom: bar.bottom - barPadding }, keys, barPadding, screenBottom: window.visualViewport!.height,
           };
         });
+        // the home indicator's room is the bar's own padding (KeyBar.css: the safe area less --space-2),
+        // checked before the spacing below measures the bar without it: a bar that lost it would put
+        // its keys at the screen's edge and still look evenly spaced
+        assert.ok(Math.abs(geometry.barPadding - Math.max(0, size.inset - 8)) <= 0.5, `${size.label}: the key bar keeps the gesture bar's room (${geometry.barPadding}px for a ${size.inset}px inset)`);
+        if (size.keyboard === 0) {
+          const clear = geometry.screenBottom - Math.max(...geometry.keys.map((key) => key.bottom));
+          assert.ok(clear >= Math.max(4, size.inset - 8), `${size.label}: the keys stand ${clear}px clear of the screen's bottom edge`);
+        }
         for (const [name, control] of [["field", geometry.text], ["send button", geometry.send]] as const) {
           const above = control.top - geometry.line.top;
           const below = geometry.line.bottom - control.bottom;
