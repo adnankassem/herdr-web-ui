@@ -2181,6 +2181,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   labels kept whole; wrapped lines start at the left. The reconnecting banner's held preview
   (`Input held: “…”`) stays on one line in mono, cut with an ellipsis, with the whole text as its
   title: a command is never broken inside a word.
+- The touch input line keeps `--space-1` above and below its field and send button (and `--space-2`
+  at the sides, as the key bar), so neither sits on the key bar's rule; its row keeps the height it
+  had, so the grid and the pty are not resized. Keys draw at `--key-h` (`--keybar-h` less `3 * --space-1`), centered
+  in the bar with equal room above and below, and reach `--touch-target` through an invisible
+  expander inside the bar; the bar's safe-area padding is added below that.
 - The mobile key bar starts with Esc, Tab and `^C`, then sticky Ctrl/Alt/Shift, Enter and arrows;
   it never steals typing focus. Modifiers remain highlighted until toggled off,
   leaving the pane/lens or disconnecting; each exposes `aria-pressed`.
