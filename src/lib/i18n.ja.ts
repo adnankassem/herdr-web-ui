@@ -1220,6 +1220,7 @@ export const JA: Record<string, string> = {
   "An agent in it is still at work, and stops with the tab.": "タブ内のエージェントはまだ作業中で、タブと一緒に停止します。",
   "It is the last tab of {workspace}: the workspace closes with it, and the agents and shells in it stop.": "{workspace} の最後のタブです。ワークスペースも一緒に閉じ、その中のエージェントとシェルが停止します。",
   "Tabs of {workspace}": "{workspace} のタブ",
+  "All tabs ({n})": "すべてのタブ ({n})",
   "{n} panes": "{n} 個のペイン",
   "Ovis sends anonymous usage counts.": "Ovis は匿名の利用集計を送信します。",
   "What is sent": "送信内容",

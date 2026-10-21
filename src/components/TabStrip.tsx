@@ -7,9 +7,12 @@
  * focus (TabStrip.css), so the menu is never only behind a right-click. Where the canvas shows a
  * split tab's panes one at a time (SOLO_PANE_QUERY), that menu lists them first.
  * That menu also carries the open pane's actions, so a lone pane shows no ellipsis of its own.
+ * When the tabs do not fit, a chevron by the + lists every tab, the open one marked, each with its
+ * agents' status: a tab scrolled out of view is one press away with a mouse as on a phone. The
+ * strip still scrolls sideways, by touch, a trackpad or a mouse wheel.
  */
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from "react";
-import { ArrowLeft, ArrowRight, Bot, Ellipsis, Pencil, Plus, Terminal, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bot, ChevronDown, Ellipsis, Pencil, Plus, Terminal, X } from "lucide-react";
 
 import "./TabStrip.css";
 
@@ -27,7 +30,7 @@ import { rosterPanes } from "../lib/dagPane.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
 import { useMediaQuery } from "../lib/useMediaQuery.ts";
 import { useTabReorder } from "../lib/useTabReorder.ts";
-import { indicatorGlyph, paneStatus, rollupStatus } from "../lib/status.ts";
+import { indicatorGlyph, paneStatus, rollupStatus, STATUS_WORD, type KnownStatus } from "../lib/status.ts";
 import { useSettings } from "../lib/settings.ts";
 import { AgentMark } from "./AgentMark.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
@@ -72,6 +75,9 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   // drawn there, so an approval card keeps its options in reach; its actions stay in the header
   const cramped = useMediaQuery("(max-width: 768px) and (max-height: 600px)");
   const strip = useRef<HTMLDivElement>(null);
+  // the tabs do not fit: the chevron that lists them all is drawn (below)
+  const [overflow, setOverflow] = useState(false);
+  const [allTabs, setAllTabs] = useState<{ anchor: HTMLElement } | null>(null);
   const [picker, setPicker] = useState<{ anchor: HTMLElement; tab: HerdrTab; point?: { x: number; y: number }; previousFocus: HTMLElement | null; touch: boolean } | null>(null);
   const [editing, setEditing] = useState<{ tabId: string; value: string } | null>(null);
   // the name just sent, shown until herdr's snapshot carries it
@@ -95,7 +101,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     if (previousOwner.current === owner) return;
     previousOwner.current = owner;
     // Native IDs can repeat on another PC. A pending dialog never changes its target PC.
-    setPicker(null); setEditing(null); setConfirm(null); setSent(null); setError(null);
+    setPicker(null); setAllTabs(null); setEditing(null); setConfirm(null); setSent(null); setError(null);
     refocus.current = null; closed.current = null;
   }, [owner]);
   const panes = rosterPanes(snapshot.panes.filter((pane) => pane.workspace_id === workspace.workspace_id), selectedPane.pane_id);
@@ -184,7 +190,7 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     if (!open) return;
     const view = row.getBoundingClientRect();
     const item = open.getBoundingClientRect();
-    const end = row.querySelector<HTMLElement>(".tab-strip-add")?.getBoundingClientRect().left ?? view.right;
+    const end = row.querySelector<HTMLElement>(".tab-strip-tail")?.getBoundingClientRect().left ?? view.right;
     const before = row.scrollLeft;
     if (item.left < view.left) row.scrollLeft -= view.left - item.left;
     else if (item.right > end) row.scrollLeft += item.right - end;
@@ -204,6 +210,28 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
   useLayoutEffect(() => {
     if (!scroll.current.moved) bringOpenTab();
   }, [faces]);
+  // measured after every render that can change the tabs' width, and whenever the strip is resized
+  // (a phone turned, a Fold opened, the sidebar dragged); the chevron itself sits in the tail the
+  // tabs already scroll under, so drawing it never changes the answer
+  const measureOverflow = (): void => {
+    const row = strip.current;
+    setOverflow(row !== null && row.scrollWidth > row.clientWidth + 1);
+  };
+  useLayoutEffect(measureOverflow);
+  useEffect(() => {
+    const row = strip.current;
+    if (!row) return;
+    const observer = new ResizeObserver(measureOverflow);
+    observer.observe(row);
+    // a mouse wheel turns vertically: over an overflowing strip it moves the tabs sideways
+    const onWheel = (event: WheelEvent): void => {
+      if (event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || row.scrollWidth <= row.clientWidth) return;
+      event.preventDefault();
+      row.scrollLeft += event.deltaY;
+    };
+    row.addEventListener("wheel", onWheel, { passive: false });
+    return () => { observer.disconnect(); row.removeEventListener("wheel", onWheel); };
+  }, [shown, cramped && tabs.length === 1]);
   const onScroll = (): void => {
     const row = strip.current;
     if (row) scroll.current = stripScrolled(scroll.current, row.scrollLeft, row.scrollWidth - row.clientWidth);
@@ -348,6 +376,24 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     ].filter((group) => group.length > 0);
     return groups.flatMap((group, at) => at === 0 ? group : group.map((item, index) => index === 0 ? { ...item, divider: true } : item));
   };
+  // every tab of the workspace, in the strip's order: the open one marked, a running, waiting or
+  // finished agent drawn with the strip's own dot and said in words
+  const allTabItems = (): RowMenuItem[] => tabs.map((tab) => {
+    const status: KnownStatus = rollupStatus(panesOf(tab).map((pane) => paneStatus(pane as HerdrPane)));
+    const shows = status === "working" || status === "blocked" || status === "waiting" || status === "done";
+    return {
+      id: `tab:${tab.tab_id}`, label: nameOf(tab), icon: Terminal,
+      glyph: shows ? (settings.statusIndicators === "classic"
+        ? <span className="tab-strip-dot tab-strip-overflow-dot" data-status={status} aria-hidden="true" />
+        : <span className="tab-strip-dot tab-strip-glyph tab-strip-overflow-dot" data-status={status} aria-hidden="true">{indicatorGlyph(status, settings.statusIndicators)}</span>) : undefined,
+      hint: shows ? t(STATUS_WORD[status]) : undefined,
+      current: tab.tab_id === selectedPane.tab_id,
+      run: () => {
+        const pane = paneFor(tab);
+        if (pane && pane.pane_id !== selectedPane.pane_id) onSelectPane(pane.pane_id);
+      },
+    };
+  });
   // the strip's + opens a shell tab; the menu keeps the dialog, where an agent is picked
   const tabActions = (tab: HerdrTab): RowMenuItem[] => [
     ...(!reorder.moving && tabs.findIndex((entry) => entry.tab_id === tab.tab_id) > 0
@@ -438,10 +484,18 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
             </div>
           );
         })}
-        <button type="button" className="tab-strip-add" aria-label={t("New terminal")} title={t("New terminal")}
-          onClick={() => { setError(null); void onNewTerminal().catch((reason: unknown) => setError(t("New terminal failed: {reason}", { reason: said(reason) }))); }}>
-          <Plus aria-hidden="true" />
-        </button>
+        <div className="tab-strip-tail">
+          {overflow && <button type="button" className="tab-strip-overflow" aria-label={t("All tabs ({n})", { n: tabs.length })} title={t("All tabs ({n})", { n: tabs.length })}
+            aria-haspopup="menu" aria-expanded={allTabs !== null}
+            onClick={(event) => { reorder.cancelDrag(); setAllTabs(allTabs ? null : { anchor: event.currentTarget }); }}>
+            <span className="tab-strip-overflow-count" aria-hidden="true">{tabs.length}</span>
+            <ChevronDown aria-hidden="true" />
+          </button>}
+          <button type="button" className="tab-strip-add" aria-label={t("New terminal")} title={t("New terminal")}
+            onClick={() => { setError(null); void onNewTerminal().catch((reason: unknown) => setError(t("New terminal failed: {reason}", { reason: said(reason) }))); }}>
+            <Plus aria-hidden="true" />
+          </button>
+        </div>
         {error && <span className="tab-strip-error" role="alert">{error}</span>}
       </div>
   );
@@ -450,6 +504,8 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
       {end === undefined ? row : <div className="tab-strip-row">{row}<div className="tab-strip-end">{end}</div></div>}
       {picker && <RowMenu anchor={picker.anchor} point={picker.point} restoreFocusTo={picker.previousFocus}
         title={nameOf(picker.tab)} items={pickerItems(picker.tab, picker.touch)} align="start" onClose={() => setPicker(null)} />}
+      {allTabs && <RowMenu anchor={allTabs.anchor} title={t("Tabs of {workspace}", { workspace: workspace.label })}
+        items={allTabItems()} onClose={() => setAllTabs(null)} />}
       {confirm && <ConfirmDialog title={confirm.title} body={confirm.body} confirmLabel={t("Close tab")} onConfirm={async () => { await close(confirm.tab); setConfirm(null); }} onClose={() => setConfirm(null)} />}
     </>
   );

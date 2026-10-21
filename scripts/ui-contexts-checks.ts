@@ -18,6 +18,7 @@ import { checkMobileViewport } from "./mobile-viewport-regression.ts";
 import { checkTerminalPinch } from "./terminal-pinch-regression.ts";
 import { checkMobileTabs } from "./mobile-tabs-regression.ts";
 import { checkTabMenu } from "./tab-menu-regression.ts";
+import { checkTabOverflow } from "./tab-overflow-regression.ts";
 import { checkDefaultView } from "./default-view-regression.ts";
 import { checkComposerReconnect } from "./composer-reconnect-regression.ts";
 import { checkDroplet } from "./droplet-regression.ts";
@@ -93,6 +94,7 @@ export async function runUiContextChecks(): Promise<void> {
     await timed("checkTerminalPinch", () => checkTerminalPinch(browser!, origin, paneB));
     await timed("checkMobileTabs", () => checkMobileTabs(browser!, origin));
     await timed("checkTabMenu", () => checkTabMenu(browser!, origin));
+    await timed("checkTabOverflow", () => checkTabOverflow(browser!, origin));
     await timed("checkDefaultView", () => checkDefaultView(browser!, origin));
     await timed("checkComposerReconnect", () => checkComposerReconnect(browser!, origin, paneB));
     await timed("checkDroplet", () => checkDroplet(browser!, origin));
