@@ -227,7 +227,10 @@ export function TabStrip({ snapshot, workspace, selectedPane, onSelectPane, onNe
     const onWheel = (event: WheelEvent): void => {
       if (event.ctrlKey || Math.abs(event.deltaX) >= Math.abs(event.deltaY) || row.scrollWidth <= row.clientWidth) return;
       event.preventDefault();
-      row.scrollLeft += event.deltaY;
+      // deltaY is in pixels, lines (Firefox's mouse wheel) or pages, as deltaMode says
+      const line = Number.parseFloat(getComputedStyle(row).fontSize) * 1.5 || 16;
+      const step = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? line : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? row.clientWidth : 1;
+      row.scrollLeft += event.deltaY * step;
     };
     row.addEventListener("wheel", onWheel, { passive: false });
     return () => { observer.disconnect(); row.removeEventListener("wheel", onWheel); };

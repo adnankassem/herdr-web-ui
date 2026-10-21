@@ -77,6 +77,15 @@ export async function checkTabOverflow(browser: Browser, origin: string): Promis
           await row.hover({ position: { x: 60, y: 10 } });
           await page.mouse.wheel(0, -400);
           await page.waitForFunction((was) => (document.querySelector(".tab-strip")?.scrollLeft ?? was) < was, before, { timeout: 5_000 });
+          // a wheel that counts in lines (Firefox's) or pages moves the strip as far as one in pixels would
+          for (const [mode, delta, least] of [[1, 3, 30], [2, 1, 200]] as const) {
+            const moved = await row.evaluate((node, [deltaMode, deltaY]) => {
+              node.scrollLeft = 0;
+              node.dispatchEvent(new WheelEvent("wheel", { deltaY, deltaMode, bubbles: true, cancelable: true }));
+              return { moved: node.scrollLeft, room: node.scrollWidth - node.clientWidth };
+            }, [mode, delta] as const);
+            assert.ok(moved.moved >= Math.min(least, moved.room - 1), `a wheel in ${mode === 1 ? "lines" : "pages"} scrolls the strip (${moved.moved}px of ${moved.room})`);
+          }
           // a workspace whose tabs fit has no chevron
           await page.goto(`${origin}/?pane=${encodeURIComponent(few.root_pane.pane_id)}`);
           await page.locator(".tab-strip-add").waitFor();
