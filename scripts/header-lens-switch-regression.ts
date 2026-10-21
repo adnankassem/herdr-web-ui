@@ -57,7 +57,9 @@ export async function checkHeaderLensSwitch(browser: Browser, origin: string, ev
         const bar = { top: geometry.header.top + geometry.insetTop, bottom: geometry.header.bottom };
         assert.ok(geometry.track.top - bar.top >= CLEARANCE && bar.bottom - geometry.track.bottom >= CLEARANCE,
           `${size.label}: the switch leaves room above and below in the bar (${JSON.stringify({ bar, track: geometry.track })})`);
-        assert.ok(geometry.track.height <= 34.5, `${size.label}: the track stays at the segmented control's height (${geometry.track.height}px)`);
+        // the density's segmented track: --control-h, 32px compact, 34px otherwise
+        const trackHeight = size.density === "compact" ? 32 : 34;
+        assert.ok(Math.abs(geometry.track.height - trackHeight) <= 0.5, `${size.label}: the track is the density's segmented height, ${trackHeight}px (${geometry.track.height}px)`);
         for (const option of geometry.options) {
           assert.ok(option.bottom - option.top >= TOUCH_TARGET - 0.5, `${size.label}: an option's touch target is ${TOUCH_TARGET}px tall (${option.bottom - option.top})`);
           assert.ok(option.width >= TOUCH_TARGET - 0.5, `${size.label}: an option is a finger wide (${option.width})`);
