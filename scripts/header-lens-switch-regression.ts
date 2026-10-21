@@ -52,14 +52,16 @@ export async function checkHeaderLensSwitch(browser: Browser, origin: string, ev
             const grow = expander.content === "none" ? 0 : -parseFloat(expander.top);
             return { top: own.top - grow, bottom: own.bottom + grow, width: own.width };
           });
-          return { header: box(header), track: box(track), options, insetTop: parseFloat(getComputedStyle(header).paddingTop) };
+          return { header: box(header), track: box(track), options, insetTop: parseFloat(getComputedStyle(header).paddingTop),
+            density: document.documentElement.dataset["density"] ?? null, controlH: parseFloat(getComputedStyle(track).getPropertyValue("--control-h")) };
         });
+        assert.ok(Math.abs(geometry.insetTop - size.inset) <= 0.5, `${size.label}: the header's top padding is the emulated safe-area inset, ${size.inset}px (${geometry.insetTop}px)`);
+        assert.equal(geometry.density, size.density ?? "comfortable", `${size.label}: the page runs in the ${size.density ?? "comfortable"} density`);
         const bar = { top: geometry.header.top + geometry.insetTop, bottom: geometry.header.bottom };
         assert.ok(geometry.track.top - bar.top >= CLEARANCE && bar.bottom - geometry.track.bottom >= CLEARANCE,
           `${size.label}: the switch leaves room above and below in the bar (${JSON.stringify({ bar, track: geometry.track })})`);
-        // the density's segmented track: --control-h, 32px compact, 34px otherwise
-        const trackHeight = size.density === "compact" ? 32 : 34;
-        assert.ok(Math.abs(geometry.track.height - trackHeight) <= 0.5, `${size.label}: the track is the density's segmented height, ${trackHeight}px (${geometry.track.height}px)`);
+        // the density's segmented track: as tall as the density's --control-h, as every .segmented is
+        assert.ok(Math.abs(geometry.track.height - geometry.controlH) <= 0.5, `${size.label}: the track is the density's --control-h, ${geometry.controlH}px (${geometry.track.height}px)`);
         for (const option of geometry.options) {
           assert.ok(option.bottom - option.top >= TOUCH_TARGET - 0.5, `${size.label}: an option's touch target is ${TOUCH_TARGET}px tall (${option.bottom - option.top})`);
           assert.ok(option.width >= TOUCH_TARGET - 0.5, `${size.label}: an option is a finger wide (${option.width})`);
