@@ -22,7 +22,8 @@ import { arrangeNotices, dismissNotice, NO_DISMISSALS, settleDismissed, type Dis
 import { hermesCtrlCTooSoon, stopKey } from "../lib/hermesStop.ts";
 import { type DraftRefusal, MAX_COMPOSER_CHARS, QUEUE_READY_STATUS, agentDisplayLabel, composerDelivery, composerMessage, composerPayload, pendingActionUncertain, submitNote, submitNotTyped, submitRefusal, typedTerminalCommand } from "../lib/compose.ts";
 import { usePaneCommands } from "../lib/usePaneCommands.ts";
-import { autoReturnArmed, paneLensFlags, returnBlocked, type PeekRequest, type TerminalPeek } from "../lib/terminalPeek.ts";
+import { autoReturnArmed, paneLensFlags, returnBlocked, screenReturnArmed, watchReturn, type PeekRequest, type TerminalPeek } from "../lib/terminalPeek.ts";
+import { FrameGate, inputRowState, readScreen, readsInputRow, type InputRowState } from "../lib/inputRow.ts";
 import { outcomeCommand } from "../lib/outcomeChip.ts";
 import { afterRead, afterSend, afterSettled, composerLift, greetingMemory, rememberGreeting, greetingFits, greetingFolder, roomOverComposer, showsGreeting, type ChatRead } from "../lib/greeting.ts";
 import { DETACHED, usePaneBranch } from "../lib/paneBranch.ts";
@@ -70,6 +71,12 @@ import { narrowPaneFontSize } from "../lib/narrowPaneFont.ts";
 import { finalStep, HERDR_MOUSE_SCROLL_LINES, wheelSteps } from "../lib/wheelSteps.ts";
 import { attachTerminalWheel, canPanTerminalGrid } from "../lib/terminalWheel.ts";
 import { visibleTerminalInputBounds } from "../lib/terminalViewport.ts";
+
+/**
+ * Build-time constant: on only in the browser lane's demo build (lib/crashProbe.ts). Read it through
+ * `typeof`: fixture bundles built with Bun.build (scripts/chat-history-fixture.tsx) do not define it.
+ */
+declare const __HERDR_TEST_HOOKS__: boolean;
 
 /** How long a resize must rest before the grid refits and the pty follows it. */
 const RESIZE_SETTLE_MS = 120;
@@ -297,6 +304,8 @@ export function PaneTerminal({
   const fitRef = useRef<FitAddon | null>(null);
   /** OSC 8 links this app cannot open are not drawn (#739); its state ends with `term.reset()` */
   const hyperlinksRef = useRef(hyperlinkFilter());
+  /** Retires the output written before a pane switch or reconnect (see `retireOutput`). */
+  const retireOutputRef = useRef<() => void>(() => {});
   const socketRef = useRef<HerdrSocket | null>(null);
   const paneRef = useRef<string | null>(paneId);
   const onConnectionChangeRef = useRef(onConnectionChange);
@@ -457,22 +466,43 @@ export function PaneTerminal({
   const commandsRef = useRef(commands);
   commandsRef.current = commands;
   const agentRef = useRef(agent); agentRef.current = agent;
-  const showSentCommand = useCallback((pane: string, text: string, known: readonly string[] | null) => {
+  // The frames of the pane's stream (lib/inputRow.ts FrameGate): the agent's input row is read only
+  // off a whole frame drawn for this grid, never mid-frame or between a resize and the redraw for it
+  const frameGateRef = useRef(new FrameGate());
+  /** What the screen shows of the agent's input row now (lib/inputRow.ts); null: no recognizer for the agent. */
+  const inputRowNow = useCallback((): InputRowState | null => {
+    const term = termRef.current;
+    const current = agentRef.current;
+    if (term === null || !readsInputRow(current)) return null;
+    if (!frameGateRef.current.current) return "unknown";
+    return inputRowState(current, readScreen(term.buffer.active, term.cols, term.rows));
+  }, []);
+  // The row as the send's receipt came, before the peek's own resize: the watch starts from it, since
+  // the first frame for a new grid may be herdr's reflow of the old screen (FrameGate reflowing)
+  const receiptRowRef = useRef<{ pane: string; text: string; state: InputRowState } | null>(null);
+  // `seen`: the agent's empty input row was on screen as the text left (read before it was typed)
+  const showSentCommand = useCallback((pane: string, text: string, known: readonly string[] | null, seen: boolean) => {
     const command = typedTerminalCommand(commandsRef.current, text);
     const open = onPeekRef.current;
     if (command === null || open === undefined || paneRef.current !== pane || !activeRef.current || !presentedRef.current || !shownRef.current
       || !chatMountedRef.current || observeRef.current || heldRef.current || endedRef.current || unsupportedRef.current) return;
     // a phone's keyboard goes down with the message box it served; the grid fits once it has gone
     if (coarseRef.current) stackRef.current?.querySelector<HTMLTextAreaElement>(".composer-text")?.blur();
-    open({ command: `${command.trigger ?? "/"}${command.name}`, text, knownOutcomeIds: known, auto: known !== null && autoReturnArmed(agentRef.current, text, command.name) });
+    // Claude's record of a closed panel, or (for the agents whose input row is known) its screen:
+    // the screen only once its recognizer has read this pane's empty row
+    const recorded = known !== null && autoReturnArmed(agentRef.current, text, command.name);
+    const watch = seen && agentRef.current !== null && screenReturnArmed(agentRef.current, text, command.name) ? agentRef.current : null;
+    const atReceipt = watch === null || frameGateRef.current.reflowing ? null : inputRowNow();
+    receiptRowRef.current = atReceipt === null ? null : { pane, text, state: atReceipt };
+    open({ command: `${command.trigger ?? "/"}${command.name}`, text, knownOutcomeIds: known, auto: recorded || watch !== null, watch, inputRowSeen: seen });
   }, []);
   // A chat row's or chip's Open Terminal: a peek the reader ends by hand. Without one (another
   // pane's tile, a PC with no terminal) the terminal lens opens, as it did before.
   const peekOutcome = useCallback((text: string) => {
     const open = onPeekRef.current;
     if (open === undefined || heldRef.current || unsupportedRef.current) { onOpenTerminal?.(); return; }
-    open({ command: outcomeCommand(text), text: null, knownOutcomeIds: null, auto: false });
-  }, [onOpenTerminal]);
+    open({ command: outcomeCommand(text), text: null, knownOutcomeIds: null, auto: false, watch: null, inputRowSeen: inputRowNow() === "ready" });
+  }, [onOpenTerminal, inputRowNow]);
   const setDraft = useCallback((value: InputDraft | ((previous: InputDraft) => InputDraft)) => {
     const owner = paneRef.current ? paneStorageId(machineId, paneRef.current) : null;
     setDraftState((previous) => ({ owner, value: typeof value === "function" ? value(previous.owner === owner ? previous.value : EMPTY_DRAFT) : value }));
@@ -503,15 +533,116 @@ export function PaneTerminal({
   // stops saying the chat may come back
   const [manualPeek, setManualPeek] = useState<TerminalPeek | null>(null);
   const autoPeek = peek !== null && peek.auto && manualPeek !== peek ? peek : null;
+  // the peek that came back by itself (the agent's record, or its screen): no screen is left open
+  const autoEndedRef = useRef<TerminalPeek | null>(null);
   const onCommandScreenClosed = useCallback((closed: TerminalPeek) => {
     if (peekRef.current !== closed) return;
     const pane = paneRef.current;
     if (returnBlocked({ heldDraft: pane !== null && draftHeldForRef.current === pane, findOpen: findOpenRef.current,
       composing: composingRef.current || compositionCommitPendingRef.current || lineComposingRef.current })) { setManualPeek(closed); return; }
+    autoEndedRef.current = closed;
     onEndPeekRef.current?.(closed);
   }, []);
   // The agent ended or the tab was put away: the chat is back for when it shows again.
   useEffect(() => { if (peek !== null && (ended || !presented)) onEndPeekRef.current?.(peek); }, [peek, ended, presented]);
+  // A watched peek (lib/terminalPeek.ts watchReturn): armed by a frame whose input row an open screen
+  // hid or covered, back on the first frame that draws the row again, empty. Read off whole frames
+  // only (onInputRowFrame), never on a timer, and nothing is typed. A draft after it arms, another
+  // agent in the pane, or a blocker (held input, the find bar, a composition) leaves it to the reader.
+  const watchRef = useRef<{ peek: TerminalPeek; agent: string; armed: boolean } | null>(null);
+  // the last peek's watch, kept past its end: whether its screen was seen open before the reader left
+  const lastWatchRef = useRef<{ peek: TerminalPeek; agent: string; armed: boolean } | null>(null);
+  const watchFrame = useCallback((state: InputRowState) => {
+    const watch = watchRef.current;
+    if (watch === null) return;
+    if (peekRef.current !== watch.peek) { watchRef.current = null; return; }
+    // another agent in the pane: its screen is not the one watched, and the head stops promising
+    if (agentRef.current !== watch.agent) { watchRef.current = null; setManualPeek(watch.peek); return; }
+    const next = watchReturn(watch.agent, watch.armed, state);
+    if (next.step === "wait") { watch.armed = next.armed; return; }
+    watchRef.current = null;
+    if (next.step === "manual") setManualPeek(watch.peek);
+    else onCommandScreenClosed(watch.peek);
+  }, [onCommandScreenClosed]);
+  // the watch starts with the peek, from the screen as it stands (the command's screen may have
+  // opened before its receipt came), and goes with it
+  useLayoutEffect(() => {
+    if (peek === null || peek.watch === null || manualPeek === peek) { watchRef.current = null; return; }
+    if (watchRef.current?.peek === peek) return;
+    watchRef.current = { peek, agent: peek.watch, armed: false };
+    lastWatchRef.current = watchRef.current;
+    const atReceipt = receiptRowRef.current;
+    receiptRowRef.current = null;
+    if (atReceipt !== null && atReceipt.pane === peek.paneId && atReceipt.text === peek.text) watchFrame(atReceipt.state);
+    const state = frameGateRef.current.reflowing ? null : inputRowNow();
+    if (state !== null && watchRef.current?.peek === peek) watchFrame(state);
+  }, [peek, manualPeek, inputRowNow, watchFrame]);
+  // A peek ended by hand while the command's screen is still open in the terminal (Claude's /btw
+  // answer, a picker left up): the next message would be typed into that screen and do nothing, so
+  // the composer says so, holds Send behind Send anyway, and offers the terminal again. Only where
+  // the agent's recognizer read the empty row as the peek began; it goes on the first whole frame
+  // showing the row back, and with another pane, agent, terminal or session. Nothing is typed to
+  // close anything. `named`: the screen is the sent command's (a peek opened by hand names none:
+  // the reader may have opened another there); `command` also heads the peek Show terminal opens.
+  type StillOpen = { pane: string; agent: string; command: string; named: boolean; history: string | undefined };
+  const [stillOpen, setStillOpenState] = useState<StillOpen | null>(null);
+  const stillOpenRef = useRef(stillOpen);
+  const setStillOpen = useCallback((next: StillOpen | null) => { stillOpenRef.current = next; setStillOpenState(next); }, []);
+  // A watched command whose screen had not opened when its peek was ended by hand (gjc's /sessions
+  // keeps its empty box for seconds while it loads): no notice yet, and the first frame that shows
+  // its screen (the agent's arm set) turns it into one. It goes with another peek, pane, agent,
+  // terminal or session, and once the agent works on a turn.
+  const pendingOpenRef = useRef<StillOpen | null>(null);
+  // A peek ended by hand while the screen read nothing (a cut frame, or a blank one): the next whole
+  // frame decides, the row back clearing it and anything else making the notice; no frame, no notice
+  const undecidedOpenRef = useRef<StillOpen | null>(null);
+  // the history the pane's chat read last: a new one (/new, /resume, a clear) is another session
+  const chatHistoryRef = useRef<{ pane: string; history: string | undefined } | null>(null);
+  // the still-open note the composer shows, whose Send anyway is one send past the guard (composerSend)
+  const stillOpenNotedRef = useRef(false);
+  // a whole frame of the pane's stream was parsed (the write callback): the watch and the guard read it
+  const onInputRowFrame = useCallback(() => {
+    const pending = pendingOpenRef.current;
+    const undecided = undecidedOpenRef.current;
+    if (watchRef.current === null && stillOpenRef.current === null && pending === null && undecided === null) return;
+    // herdr's first frame for the pane's new size may be its old screen reflowed: no screen opened or closed
+    if (frameGateRef.current.reflowing) return;
+    const state = inputRowNow();
+    if (state === null || state === "unknown") return;
+    if (undecided !== null) {
+      undecidedOpenRef.current = null;
+      if (state !== "ready" && undecided.pane === paneRef.current && undecided.agent === agentRef.current) setStillOpen(undecided);
+    }
+    if (state === "ready" && stillOpenRef.current !== null) setStillOpen(null);
+    // the command's screen opened after its peek ended: now it would take the next message
+    if (pending !== null) {
+      const step = pending.pane === paneRef.current && pending.agent === agentRef.current ? watchReturn(pending.agent, false, state) : null;
+      if (step === null) pendingOpenRef.current = null;
+      else if (step.step === "wait" && step.armed) { pendingOpenRef.current = null; setStillOpen(pending); }
+    }
+    watchFrame(state);
+  }, [inputRowNow, watchFrame, setStillOpen]);
+  const onInputRowFrameRef = useRef(onInputRowFrame); onInputRowFrameRef.current = onInputRowFrame;
+  useLayoutEffect(() => { setStillOpen(null); pendingOpenRef.current = null; undecidedOpenRef.current = null; stillOpenNotedRef.current = false; }, [paneId, terminalId, setStillOpen]);
+  useEffect(() => {
+    if (stillOpenRef.current !== null && stillOpenRef.current.agent !== agent) setStillOpen(null);
+    if (pendingOpenRef.current !== null && pendingOpenRef.current.agent !== agent) pendingOpenRef.current = null;
+    if (undecidedOpenRef.current !== null && undecidedOpenRef.current.agent !== agent) undecidedOpenRef.current = null;
+  }, [agent, setStillOpen]);
+  // a turn began: whatever the command was loading, the agent has moved on
+  useEffect(() => { if (agentStatus === "working") { pendingOpenRef.current = null; undecidedOpenRef.current = null; } }, [agentStatus]);
+  // what the composer and the queue say when the screen would take a send
+  const stillOpenNote = useCallback((open: StillOpen): string => open.named
+    ? t("Not sent: {command} is still open in the terminal.", { command: open.command })
+    : t("Not sent: a screen is still open in the terminal."), [t]);
+  // the terminal again, for the screen still open there: a peek the reader ends by hand
+  const showStillOpen = useCallback(() => {
+    const open = stillOpenRef.current;
+    const show = onPeekRef.current;
+    if (open === null) return;
+    if (show === undefined || heldRef.current || unsupportedRef.current) { onOpenTerminal?.(); return; }
+    show({ command: open.command, text: null, knownOutcomeIds: null, auto: false, watch: null, inputRowSeen: true });
+  }, [onOpenTerminal]);
   // Every end of a peek back to the chat: the hidden grid lets go of the keyboard (it has no Chat
   // guard of its own, and keys typed after the return would reach the pane), and a desktop's typing
   // goes back to the message box of the same pane (another pane's composer focuses itself, or not,
@@ -521,10 +652,27 @@ export function PaneTerminal({
   useLayoutEffect(() => {
     const was = shownPeekRef.current;
     shownPeekRef.current = peek;
+    // another peek: what the last one left pending is its own again
+    if (peek !== null) { pendingOpenRef.current = null; undecidedOpenRef.current = null; }
     if (was === null || peek !== null) return;
     if (!chatMounted) {
       if (activeRef.current && was.paneId === paneRef.current && !coarseRef.current && !modalOpen() && !findOpenRef.current) termRef.current?.focus();
       return;
+    }
+    // ended by hand on the same pane, over a screen its recognizer knows: is the screen still open?
+    if (was !== autoEndedRef.current && was.inputRowSeen && was.paneId === paneRef.current && agentRef.current !== null) {
+      const state = inputRowNow();
+      const history = chatHistoryRef.current?.pane === was.paneId ? chatHistoryRef.current.history : undefined;
+      // a peek opened by hand names no command, unless it showed a screen the guard still names (no row seen back since)
+      const kept = stillOpenRef.current?.pane === was.paneId ? stillOpenRef.current : null;
+      const open: StillOpen = { pane: was.paneId, agent: agentRef.current, command: was.text === null && kept !== null ? kept.command : was.command,
+        named: was.text !== null || kept?.named === true, history };
+      const watched = lastWatchRef.current?.peek === was ? lastWatchRef.current : null;
+      if (state === "ready") {
+        setStillOpen(null);
+        if (watched !== null && !watched.armed && watched.agent === agentRef.current) pendingOpenRef.current = open;
+      } else if (state === "unknown") undecidedOpenRef.current = open;
+      else if (state !== null) setStillOpen(open);
     }
     termRef.current?.blur();
     const focused = document.activeElement;
@@ -532,7 +680,7 @@ export function PaneTerminal({
     if (activeRef.current && was.paneId === paneRef.current && !coarseRef.current && !modalOpen()) {
       stackRef.current?.querySelector<HTMLTextAreaElement>(".composer-text")?.focus({ preventScroll: true });
     }
-  }, [peek, chatMounted]);
+  }, [peek, chatMounted]); // eslint-disable-line react-hooks/exhaustive-deps -- read at the end only
   // an older bridge pushes no transcript changes: the chat reads at the former 2s cadence
   const [conversationPushes, setConversationPushes] = useState(false);
   const onConversationWatch = useCallback((pane: string, enabled: boolean) => {
@@ -552,12 +700,22 @@ export function PaneTerminal({
   // It lives in lib/greeting.ts, over this component, which another PC's pane mounts again.
   const [, redrawGreeting] = useReducer((count: number) => count + 1, 0);
   const onChatRead = useCallback((pane: string, read: ChatRead | null) => {
+    if (read !== null) {
+      // another session in the pane (a new history): a screen left open in the old one is no more
+      const open = stillOpenRef.current;
+      if (open !== null && open.pane === pane && read.history !== undefined && open.history !== undefined && read.history !== open.history) setStillOpen(null);
+      const pending = pendingOpenRef.current;
+      if (pending !== null && pending.pane === pane && read.history !== undefined && pending.history !== undefined && read.history !== pending.history) pendingOpenRef.current = null;
+      const undecided = undecidedOpenRef.current;
+      if (undecided !== null && undecided.pane === pane && read.history !== undefined && undecided.history !== undefined && read.history !== undecided.history) undecidedOpenRef.current = null;
+      chatHistoryRef.current = { pane, history: read.history };
+    }
     const owner = paneStorageId(machineId, pane);
     const memory = greetingMemory(owner);
     const next = afterRead(memory, read);
     if (next === memory) return;
     rememberGreeting(owner, next); redrawGreeting();
-  }, [machineId]);
+  }, [machineId, setStillOpen]);
   // the stack (stackRef, above) holds the composer and the greeting over it (measured below)
   const [greetingRoom, setGreetingRoom] = useState(true);
   const greetingRef = useRef<HTMLDivElement | null>(null);
@@ -761,6 +919,8 @@ export function PaneTerminal({
     syncInputViewport();
     host.addEventListener("scroll", syncInputViewport, { passive: true });
     const inputViewportResize = term.onResize(syncInputViewport);
+    // a resized grid holds the screen drawn for the old one until the agent draws again
+    const frameResize = term.onResize(() => frameGateRef.current.resized());
     // Font changes resize a fixed screen without changing its rows, columns or host.
     const inputScreenResize = new ResizeObserver(syncInputViewport);
     const inputScreen = term.element?.querySelector<HTMLElement>(".xterm-screen");
@@ -1221,6 +1381,84 @@ export function PaneTerminal({
     window.addEventListener("blur", onBlur);
     window.addEventListener("mouseup", onMouseUp);
 
+    // Output reaches xterm one frame at a time, so the frame being parsed is known: a frame the
+    // bridge marked `replay` (the screen from before this attach) is presentation history, and a
+    // copy request in it was answered when it was new. The flag holds from the frame's write
+    // until its callback; xterm's own parser state says whether a replayed OSC is still open.
+    const outputFrames: { data: string; replay: boolean; done?: () => void }[] = [];
+    let writingOutput = false;
+    let parsingReplay = false;
+    // Which output the frames belong to: a pane switch or reconnect starts new output, and the
+    // frame xterm is parsing then is the old output's (`parsingOwner`), which copies nothing.
+    let outputOwner = 0;
+    let parsingOwner = 0;
+    // a replayed frame, or retired output, ended inside an OSC that may still dispatch as OSC 52 in a
+    // later live write
+    let replayOscOpen = false;
+    const oscMayCopy = (): boolean => {
+      const osc = term.oscStringState();
+      return osc.open && (!osc.idComplete || osc.id === 52);
+    };
+    const writeNextOutput = (): void => {
+      const frame = outputFrames.shift();
+      if (!frame || disposed) {
+        writingOutput = false;
+        return;
+      }
+      writingOutput = true;
+      parsingReplay = frame.replay;
+      const owner = parsingOwner = outputOwner;
+      term.write(frame.data, () => {
+        parsingReplay = false;
+        if (!disposed) {
+          // retired output is history to the new output, as a replayed frame is
+          if (frame.replay || owner !== outputOwner) replayOscOpen = oscMayCopy();
+          // the replayed OSC ended without dispatching as OSC 52 (aborted, or another identifier)
+          else if (replayOscOpen && !term.oscStringState().open) replayOscOpen = false;
+        }
+        try {
+          frame.done?.();
+        } finally {
+          writeNextOutput();
+        }
+      });
+    };
+    const writeOutput = (data: string, replay = false, done?: () => void): void => {
+      outputFrames.push({ data, replay, done });
+      if (!writingOutput) writeNextOutput();
+    };
+    // A pane switch resets the parser, and a reconnect replays afresh: frames still queued from
+    // before are dropped unwritten (their connection or pane is gone, so they have no ACK to send),
+    // and the one xterm is parsing finishes with no clipboard write. Its callback still runs, and
+    // its own owner and generation checks keep it off the new output. An OSC the old output left
+    // open in xterm is guarded as a replayed one: its callback decides for a frame still parsing.
+    // The frame gate read those dropped frames as they came, so their stream ends there too: a
+    // synchronized update one opened would otherwise keep later frames from settling until
+    // another synchronized update closed.
+    const retireOutput = (): void => {
+      outputOwner++;
+      outputFrames.length = 0;
+      frameGateRef.current.reset();
+      if (!writingOutput) replayOscOpen = oscMayCopy();
+    };
+    retireOutputRef.current = retireOutput;
+    if (typeof __HERDR_TEST_HOOKS__ === "boolean" && __HERDR_TEST_HOOKS__) {
+      // browser scripts read the parse state and count xterm writes in flight (never in a release build)
+      let inFlight = 0;
+      let peakInFlight = 0;
+      let writes = 0;
+      let written = "";
+      const write = term.write.bind(term);
+      term.write = (data, callback) => {
+        inFlight++;
+        writes++;
+        if (typeof data === "string") written = (written + data).slice(-4096);
+        peakInFlight = Math.max(peakInFlight, inFlight);
+        write(data, () => { inFlight--; callback?.(); });
+      };
+      Object.assign(host, { outputProbe: () => ({ ...term.oscStringState(), parsingReplay, replayOscOpen, retired: writingOutput && parsingOwner !== outputOwner, queued: outputFrames.length, inFlight, peakInFlight, writes, written, frameSettled: frameGateRef.current.current }) });
+    }
+
     // OSC 52: the pane program asked the terminal to set the clipboard - the pty
     // cannot reach the browser clipboard by itself, so xterm hands us the sequence and
     // navigator.clipboard completes the hop (text only; queries are ignored).
@@ -1228,7 +1466,10 @@ export function PaneTerminal({
     // copy this way, but any process in the pane, an agent's tool calls included, can plant text the
     // user then pastes somewhere else.
     const osc52 = term.parser.registerOscHandler(52, (payload) => {
-      if (osc52AllowedRef.current) {
+      const replayed = parsingReplay || replayOscOpen;
+      // OSCs do not nest: the replayed one the flag waited for ends here
+      replayOscOpen = false;
+      if (!replayed && parsingOwner === outputOwner && osc52AllowedRef.current) {
         const text = parseOsc52(payload);
         if (text !== null) {
           void navigator.clipboard?.writeText(text).then(
@@ -1319,7 +1560,13 @@ export function PaneTerminal({
         const generation = outputGeneration;
         const lifetime = outputLifetime;
         const target = outputTargetRef.current;
-        term.write(message.data, () => {
+        // where herdr's frame stands after this chunk, and whether the grid matched the pane's as it came
+        const gridMatches = (): boolean => {
+          const shared = sharedGridRef.current;
+          return shared === null || (shared.cols === term.cols && shared.rows === term.rows);
+        };
+        const stamp = frameGateRef.current.enqueue(message.data, gridMatches());
+        writeOutput(message.data, message.replay === true, () => {
           acknowledge?.();
           if (disposed) return;
           if (paneRef.current !== owner || generation !== outputGeneration) {
@@ -1349,11 +1596,13 @@ export function PaneTerminal({
           secretRef.current = prompt;
           term.options.disableStdin = observeRef.current || heldRef.current;
           setSecret((previous) => previous?.pane === owner && previous.prompt === prompt ? previous : prompt ? { pane: owner, prompt } : null);
+          // a whole frame for this grid: the agent's input row may be read (a watched peek, the still-open guard)
+          if (frameGateRef.current.settle(stamp, lifetime === outputLifetime && !outputRecovering && gridMatches())) onInputRowFrameRef.current();
         });
       } else if (message.type === "watch-data") {
         // a read-only view drawn for this grid: written as it comes, never acknowledged
         if (message.pane_id !== paneRef.current || !releasedRef.current || !watchingRef.current) return;
-        term.write(message.data);
+        writeOutput(message.data);
       } else if (message.type === "watch-end") {
         // the view ended: the last screen stays, and the banner says the tab is paused
         if (message.pane_id === paneRef.current) setWatching(false);
@@ -1403,7 +1652,10 @@ export function PaneTerminal({
         }
         // kept while the terminal lens ignores it: another device may drive the grid, and the
         // chat lens entered later must draw its hidden screen for that grid, not this device's
+        const before = sharedGridRef.current;
         sharedGridRef.current = { cols: message.cols, rows: message.rows };
+        // the pty took a new size: herdr may draw the old screen reflowed before the agent redraws (lib/inputRow.ts FrameGate)
+        if (!message.fixed && before !== null && (before.cols !== message.cols || before.rows !== message.rows)) frameGateRef.current.reflowed();
         // the chat lens adopts the shared grid too: the screen it reads (a masked prompt) is drawn for it
         if (!observeRef.current && !fixedGridRef.current && !followRef.current && !chatViewRef.current) {
           if (!keyboardHeld) return;
@@ -1460,7 +1712,7 @@ export function PaneTerminal({
           }
           return;
         }
-        term.writeln(`\r\n\u001b[31m[Ovis] ${message.code}: ${message.message}\u001b[0m`);
+        writeOutput(`\r\n\u001b[31m[Ovis] ${message.code}: ${message.message}\u001b[0m\r\n`);
       }
       setConnected(socket.connected);
       setConversationPushes(socket.conversationPushes());
@@ -1471,6 +1723,7 @@ export function PaneTerminal({
       pendingEpochRef.current = session.epoch;
       outputGeneration++;
       outputRecovering = false;
+      retireOutputRef.current();
       setOutputReady(false);
       setInputReady(false);
       setConnected(false);
@@ -1975,6 +2228,8 @@ export function PaneTerminal({
         return;
       }
       socket.detach(current);
+      // the attach's output is over: what is still queued has no ACK to send and copies nothing
+      retireOutput();
       // The server's detach receipt holds pending input on this still-live PC connection.
       setReleased(true);
       cachedReleaseRef.current = cachedRef.current;
@@ -1984,7 +2239,7 @@ export function PaneTerminal({
     const watch = (pane: string): void => {
       const generation = ++outputGeneration;
       // Reset in stream order: the attach's queued writes must not draw over the view.
-      term.write("\x1bc", () => {
+      writeOutput("\x1bc", false, () => {
         if (disposed || paneRef.current !== pane || generation !== outputGeneration) return;
         modifyOtherKeysRef.current = 0;
       });
@@ -2037,8 +2292,10 @@ export function PaneTerminal({
       // before its replay, so it revokes this again before any retained bytes.
       outputRecovering = false;
       // Reset in stream order: synchronous reset would let old queued writes draw afterward.
+      // A frame the old stream left open is not the new one's
+      frameGateRef.current.reset();
       if (!cachedReleaseRef.current) {
-        term.write("\x1bc", () => {
+        writeOutput("\x1bc", false, () => {
           if (disposed || paneRef.current !== current || generation !== outputGeneration) return;
           modifyOtherKeysRef.current = 0;
         });
@@ -2193,6 +2450,7 @@ export function PaneTerminal({
       onModifiedEnter.dispose();
       onCommandBackspace.dispose();
       inputViewportResize.dispose();
+      frameResize.dispose();
       inputScreenResize.disconnect();
       host.removeEventListener("scroll", syncInputViewport);
       for (const type of keepTextOn) textarea?.removeEventListener(type, keepText, true);
@@ -2203,6 +2461,11 @@ export function PaneTerminal({
       host.removeEventListener("dragover", onDragOver);
       host.removeEventListener("drop", onDrop);
       offDisconnect();
+      // frames still waiting are a retired terminal's: nothing writes or acknowledges them
+      outputFrames.length = 0;
+      parsingReplay = false;
+      replayOscOpen = false;
+      retireOutputRef.current = () => {};
       osc52.dispose();
       osc8.dispose();
       modifyOtherKeysSet.dispose();
@@ -2391,6 +2654,8 @@ export function PaneTerminal({
     setDraft(saved);
     draftPaneRef.current = paneId;
     term.reset();
+    retireOutputRef.current();
+    frameGateRef.current.reset();
     hyperlinksRef.current.reset();
     modifyOtherKeysRef.current = 0;
     if (!paneId) return;
@@ -2568,14 +2833,18 @@ export function PaneTerminal({
 
   const sendComposerText = useCallback((text: string, delivery: "queue" | "immediate" = "immediate"): false | Promise<true | string> => {
     const pane = paneRef.current;
+    // a screen a peek left open would take it: the row keeps it (the notice's close, or the screen's, lets it go)
+    const open = stillOpenRef.current;
+    if (pane !== null && open !== null && open.pane === pane) return Promise.resolve(stillOpenNote(open));
     const known = knownOutcomes(pane);
+    const seen = inputRowNow() === "ready";
     const result = submitComposerMessage(text, delivery);
     return result === null ? false : result.then((answer) => {
       if (!answer.ok) return submitNote(answer.code, answer.message, agent);
-      if (pane !== null && answer.pending === undefined && !answer.unconfirmed) showSentCommand(pane, text, known);
+      if (pane !== null && answer.pending === undefined && !answer.unconfirmed) showSentCommand(pane, text, known, seen);
       return true;
     });
-  }, [submitComposerMessage, agent, showSentCommand]);
+  }, [submitComposerMessage, agent, showSentCommand, inputRowNow, stillOpenNote]);
 
   // the terminal's input line: the text typed like the keyboard would, into an agent's open
   // menu too, then Enter after the server's gap; several lines go as one paste
@@ -2791,12 +3060,22 @@ export function PaneTerminal({
       </>,
     });
     if (clipboardNote) noticeItems.push({ id: `${owner}:clipboard`, priority: "notice", revision: clipboardNote, warning: false, mark: <ClipboardCheck />, text: clipboardNote });
+    // a peek ended by hand over a screen still open in the terminal: the next message would land in it
+    if (stillOpen !== null && stillOpen.pane === paneId) noticeItems.push({
+      id: `${owner}:still-open`, priority: "urgent", revision: stillOpen.named ? stillOpen.command : "", warning: false, mark: <SquareTerminal />,
+      text: stillOpen.named ? t("{command} is still open in the terminal", { command: stillOpen.command }) : t("A screen is still open in the terminal"),
+      actions: <button type="button" className="composer-notice-action" onClick={showStillOpen}>{t("Show terminal")}</button>,
+    });
   }
   const settledNotices = settleDismissed(dismissedNotices, noticeItems);
   if (settledNotices !== dismissedNotices) setDismissedNotices(settledNotices);
   const shownNotices = noticesDocked ? arrangeNotices(noticeItems, settledNotices) : [];
   const composerNotices = shownNotices.length > 0
-    ? <ComposerNotices notices={shownNotices} onDismiss={(notice) => { setDismissedNotices((dismissed) => dismissNotice(dismissed, notice)); }} />
+    ? <ComposerNotices notices={shownNotices} onDismiss={(notice) => {
+      // put away, the still-open notice no longer holds a send: the reader has seen the terminal's state
+      if (notice.id.endsWith(":still-open")) { setStillOpen(null); return; }
+      setDismissedNotices((dismissed) => dismissNotice(dismissed, notice));
+    }} />
     : null;
 
   const composerSend = useCallback(
@@ -2825,6 +3104,17 @@ export function PaneTerminal({
         );
       }
       if (!socketRef.current?.connected || heldRef.current || secretRef.current !== null) return false;
+      // A screen a peek left open in the terminal would take the message: Send says so and keeps it,
+      // and the note's Send anyway sends it once (the recognizer may be wrong), as a plain send: it
+      // answers this guard, never a box the server showed
+      const notedStillOpen = stillOpenNotedRef.current;
+      stillOpenNotedRef.current = false;
+      const open = stillOpenRef.current;
+      if (sendAnyway && notedStillOpen) sendAnyway = false;
+      else if (!sendAnyway && open !== null && open.pane === pane) {
+        stillOpenNotedRef.current = true;
+        return { note: stillOpenNote(open), anyway: true, plain: true };
+      }
       // an older bridge is told apart by the socket, once this connection's snapshot has said what it supports.
       // A draft is cleared only by a send at once: one that waits its turn is checked when it goes
       // with automatic sending off, a follow-up waits for Send now; the socket queues it on a PC too old to hold one
@@ -2833,14 +3123,15 @@ export function PaneTerminal({
       // Send anyway answered a box seen at once: an agent that started working since would queue it unchecked
       if (sendAnyway && delivery !== "immediate") return t("Not sent: the agent started working since. Check the terminal, then send again.");
       const known = knownOutcomes(pane);
+      const seen = inputRowNow() === "ready";
       const result = submitComposerMessage(text, delivery, delivery === "immediate" ? clearDraft : undefined, sendAnyway);
       return result === null ? false : result.then((answer) => {
         if (!answer.ok) return submitRefusal(answer.code, answer.message, answer.draft, answer.box, agent);
-        if (pane !== null && delivery === "immediate" && answer.pending === undefined && !answer.unconfirmed) showSentCommand(pane, text, known);
+        if (pane !== null && delivery === "immediate" && answer.pending === undefined && !answer.unconfirmed) showSentCommand(pane, text, known, seen);
         return true;
       });
     },
-    [agent, agentStatus, answerPanePrompt, answering, heldByOpenQueue, submitComposerMessage, queueStore, machineId, settings.autoSendQueued, showSentCommand],
+    [agent, agentStatus, answerPanePrompt, answering, heldByOpenQueue, submitComposerMessage, queueStore, machineId, settings.autoSendQueued, showSentCommand, inputRowNow, stillOpenNote],
   );
 
   const actOnPending = useCallback(async (id: string, action: "steer" | "discard"): Promise<void> => {
@@ -2861,6 +3152,12 @@ export function PaneTerminal({
         pendingMessages.fail(owner, id, { code: "held_input", message: "send or discard the held input first" }, false);
         return;
       }
+      // a screen a peek left open would take it, as it would the composer's Send
+      const open = stillOpenRef.current;
+      if (action === "steer" && open !== null && open.pane === pane) {
+        pendingMessages.fail(owner, id, { code: "still_open", message: stillOpenNote(open) }, false);
+        return;
+      }
       if (!pendingMessages.begin(owner, id)) return;
       try {
         if (message.serverOwned) {
@@ -2873,6 +3170,7 @@ export function PaneTerminal({
           });
           try {
             const known = knownOutcomes(pane);
+            const seen = inputRowNow() === "ready";
             const result = socket?.pendingAction(pane, id, action, message.resendGeneration ?? 0);
             // offline: no frame left (the row shows submitNote's wording, not this message)
             if (!result) {
@@ -2882,7 +3180,7 @@ export function PaneTerminal({
             // as a composer send: the pane keeps its connection and lease until the receipt settles
             const releaseSubmit = submitRetention?.retain(pane);
             const answer = await result.finally(() => releaseSubmit?.());
-            if (answer.ok && action === "steer" && delivered) showSentCommand(pane, message.text, known);
+            if (answer.ok && action === "steer" && delivered) showSentCommand(pane, message.text, known, seen);
             if (!answer.ok) pendingMessages.fail(owner, id, { code: answer.code, message: answer.message }, pendingActionUncertain(answer.code, message.state),
               action === "steer" ? message.resendGeneration ?? 0 : undefined);
           } finally {
@@ -2896,6 +3194,7 @@ export function PaneTerminal({
             return;
           }
           const known = knownOutcomes(pane);
+          const seen = inputRowNow() === "ready";
           const result = submitComposerMessage(message.text, "immediate", undefined, false, id, message.resendGeneration ?? 0);
           if (!result) {
             pendingMessages.fail(owner, id, { code: "not_transmitted", message: "the connection dropped before this message was sent" }, false);
@@ -2904,7 +3203,7 @@ export function PaneTerminal({
           const answer = await result;
           if (answer.ok) {
             pendingMessages.removeCopy(owner, id);
-            if (answer.pending === undefined && !answer.unconfirmed) showSentCommand(pane, message.text, known);
+            if (answer.pending === undefined && !answer.unconfirmed) showSentCommand(pane, message.text, known, seen);
           }
           else pendingMessages.fail(owner, id, { code: answer.code, message: answer.message }, !submitNotTyped(answer.code), message.resendGeneration ?? 0);
         }
@@ -2916,7 +3215,7 @@ export function PaneTerminal({
     // authority on LAN HTTP and when two tabs have already read the same held copy.
     if (navigator.locks) await navigator.locks.request(`pending:${queueOwner}:${id}`, perform);
     else await perform();
-  }, [answering, ended, heldByOpenQueue, paneId, queueOwner, submitComposerMessage, submitRetention, showSentCommand]);
+  }, [answering, ended, heldByOpenQueue, paneId, queueOwner, submitComposerMessage, submitRetention, showSentCommand, inputRowNow, stillOpenNote]);
 
 
   // Capture the owner's pane for the entire upload batch, even across a pane switch.
