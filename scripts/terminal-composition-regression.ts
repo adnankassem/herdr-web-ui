@@ -29,10 +29,6 @@ export async function checkTerminalComposition(browser: Browser, origin: string)
       await page.goto(`${origin}/?pane=${encodeURIComponent(ws.root_pane.pane_id)}`);
       await page.locator(".xterm-rows").waitFor();
       await page.waitForFunction(() => document.querySelector(".xterm-rows")?.textContent?.includes("400") ?? false, null, { timeout: 15_000 });
-      const g = await page.evaluate(() => {
-        const b = (q: string) => { const n = document.querySelector(q); if (!n) return null; const r = n.getBoundingClientRect(); return Math.round(r.width * 10) / 10; };
-        return { pane: b(".pane-terminal"), screen: b(".xterm-screen"), rowsW: b(".xterm-rows"), docScroll: document.documentElement.scrollWidth, inner: innerWidth, scrollX };
-      });
       // simulate long dictation composition
       const cdp = await ctx.newCDPSession(page);
       const target = mode === "line" ? ".terminal-input-text" : ".xterm-helper-textarea";
@@ -45,26 +41,30 @@ export async function checkTerminalComposition(browser: Browser, origin: string)
       }
       // the box shows the whole composition and has been fitted to the grid (Direct), or the line holds it
       await page.waitForFunction(([m, text]) => m === "line"
-        ? (document.querySelector(".terminal-input-text") as HTMLTextAreaElement | null)?.value.includes(text.slice(0, 20)) ?? false
+        ? (document.querySelector(".terminal-input-text") as HTMLTextAreaElement | null)?.value.includes(text) ?? false
         : document.querySelector(".composition-view.active")?.textContent === text, [mode, composed] as const, { timeout: 10_000 });
       const after = await page.evaluate(() => {
         const scrollers: string[] = [];
         for (const n of document.querySelectorAll<HTMLElement>("*")) if (n.scrollLeft > 0) scrollers.push(`${n.className || n.tagName}:${n.scrollLeft}`);
-        return { docScroll: document.documentElement.scrollWidth, scrollX, vvLeft: visualViewport!.offsetLeft, scrollers: scrollers.slice(0, 6) };
+        return { docScroll: document.documentElement.scrollWidth, inner: innerWidth, scrollX, scrollers: scrollers.slice(0, 6) };
       });
       const label = `${w} ${mode} ${font || "default font"}`;
       const view = await page.evaluate(() => {
         const box = document.querySelector(".composition-view.active")?.getBoundingClientRect();
         const screen = document.querySelector(".xterm-screen")!.getBoundingClientRect();
         const cell = screen.width / (document.querySelector(".xterm-rows")!.firstElementChild!.textContent!.length || 1);
-        return { right: box?.right ?? null, screenRight: screen.right, cell, host: document.querySelector(".pane-terminal")!.scrollLeft };
+        const host = document.querySelector<HTMLElement>(".pane-terminal")!;
+        const pad = getComputedStyle(document.querySelector(".pane-terminal .xterm")!);
+        // the width the fit gives the grid: the pane's, less the gutter on .xterm
+        const room = host.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight);
+        return { right: box?.right ?? null, screenRight: screen.right, screen: screen.width, room, cell, host: host.scrollLeft };
       });
       if (out) await page.screenshot({ path: `${out}/composition-${w}-${mode}-${font ? "jb" : "default"}.png` });
-      assert.ok(after.docScroll <= g.inner, `${label}: the page does not grow sideways (${after.docScroll} > ${g.inner})`);
+      assert.ok(after.docScroll <= after.inner, `${label}: the page does not grow sideways (${after.docScroll} > ${after.inner}; ${after.scrollers.join(", ")})`);
       assert.equal(after.scrollX, 0, `${label}: the page is not scrolled sideways`);
       assert.equal(view.host, 0, `${label}: the terminal is not pushed sideways (${view.host})`);
       if (mode === "direct") assert.ok(view.right !== null && view.right <= view.screenRight + 1, `${label}: the composition stays inside the grid (${view.right} > ${view.screenRight})`);
-      assert.ok(g.pane! - 16 - g.screen! < Math.max(view.cell, 12), `${label}: the grid fills the pane (${g.screen} of ${g.pane})`);
+      assert.ok(view.screen <= view.room + 0.5 && view.room - view.screen < Math.max(view.cell, 12), `${label}: the grid fills the pane and stays inside it (${view.screen} of ${view.room})`);
       console.log("ok", label);
       await cdp.send("Input.imeSetComposition", { text: "", selectionStart: 0, selectionEnd: 0 }).catch(() => {});
       await ctx.close();
