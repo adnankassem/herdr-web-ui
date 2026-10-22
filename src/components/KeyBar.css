@@ -93,10 +93,12 @@
     border-color var(--dur-fast) var(--ease-out);
 }
 
+/* the key's --touch-target tap area: measured from the key's padding box, inside its hairline
+   edge, so the edge is counted out (as CommandPalette.css's filter chips) */
 .key::before {
   content: "";
   position: absolute;
-  inset: calc((var(--key-h) - var(--touch-target)) / 2) 0;
+  inset: calc((var(--key-h) - var(--touch-target)) / 2 - var(--hairline)) 0;
 }
 
 .key svg {

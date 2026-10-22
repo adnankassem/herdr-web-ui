@@ -2,7 +2,8 @@
  * The phone's terminal input line and key bar are evenly spaced: the field and the send button have
  * the same room below them as above (they never sit on the key bar's rule), and the keys sit in the
  * middle of the key bar with room above and below (never against the screen's edge), each still a
- * 44px touch target inside the bar. Folded (412) and unfolded (720) widths, a gesture-bar inset,
+ * 44px touch target inside the bar: a tap just inside that band, above or below a key, lands on the
+ * key and not on the bar behind it. Folded (412) and unfolded (720) widths, a gesture-bar inset,
  * the on-screen keyboard up (visualViewport) and a landscape phone. On the isolated test herdr;
  * UI_EVIDENCE_DIR=<dir> keeps the screenshots.
  */
@@ -56,14 +57,25 @@ export async function checkTerminalInputSpacing(browser: Browser, origin: string
           const keyBar = document.querySelector(".key-bar")!;
           const bar = keyBar.getBoundingClientRect();
           const barPadding = parseFloat(getComputedStyle(keyBar).paddingBottom);
+          const target = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--touch-target"));
           const keys = [...keyBar.querySelectorAll<HTMLElement>(".key")].map((key) => {
             const own = key.getBoundingClientRect();
-            const grow = -parseFloat(getComputedStyle(key, "::before").top) || 0;
-            return { top: own.top, bottom: own.bottom, tapTop: own.top - grow, tapBottom: own.bottom + grow };
+            const middle = (own.top + own.bottom) / 2;
+            const x = (own.left + own.right) / 2;
+            // a finger half a pixel inside the touch target's band, above and below the key's middle
+            // column: the tap must land on the key (through its expander), not on the bar behind it.
+            // Chromium's hit test reaches up to a pixel past a box's top edge but not its bottom, so a
+            // 42px expander fails below. A key scrolled out of the bar's view cannot be hit, so only
+            // the ones in view are tried
+            const inView = x > bar.left + 1 && x < Math.min(bar.right, window.innerWidth) - 1;
+            const lands = (y: number) => document.elementFromPoint(x, y)?.closest(".key") === key;
+            const tapTop = middle - target / 2;
+            const tapBottom = middle + target / 2;
+            return { top: own.top, bottom: own.bottom, tapTop, tapBottom, inView, landsAbove: inView && lands(tapTop + 0.5), landsBelow: inView && lands(tapBottom - 0.5) };
           });
           return {
             line: { top: line.top + 1, bottom: line.bottom }, text: box(".terminal-input-text"), send: box(".terminal-input-send"),
-            bar: { top: bar.top, bottom: bar.bottom - barPadding }, keys, barPadding, screenBottom: window.visualViewport!.height,
+            bar: { top: bar.top, bottom: bar.bottom - barPadding }, keys, target, barPadding, screenBottom: window.visualViewport!.height,
           };
         });
         // the home indicator's room is the bar's own padding (KeyBar.css: the safe area less --space-2),
@@ -80,12 +92,15 @@ export async function checkTerminalInputSpacing(browser: Browser, origin: string
           assert.ok(below >= 3.5 && Math.abs(above - below) <= 1.5, `${size.label}: the ${name} has as much room below as above (${above} / ${below})`);
         }
         assert.ok(geometry.keys.length > 0, `${size.label}: the key bar shows keys`);
+        assert.equal(geometry.target, 44, `${size.label}: the touch target is 44px`);
+        assert.ok(geometry.keys.some((key) => key.inView), `${size.label}: a key is in view to tap`);
         for (const key of geometry.keys) {
           const above = key.top - geometry.bar.top;
           const below = geometry.bar.bottom - key.bottom;
           assert.ok(above >= 4 && below >= 4 && Math.abs(above - below) <= 1.5, `${size.label}: a key sits in the middle of the bar (${above} / ${below})`);
-          assert.ok(key.tapBottom - key.tapTop >= 43.5, `${size.label}: a key keeps a 44px touch target (${key.tapBottom - key.tapTop})`);
-          assert.ok(key.tapTop >= geometry.bar.top - 0.5, `${size.label}: a key's touch target stays inside the bar`);
+          assert.ok(key.tapTop >= geometry.bar.top - 0.5 && key.tapBottom <= geometry.bar.bottom + 0.5, `${size.label}: a key's touch target stays inside the bar (${key.tapTop - geometry.bar.top} / ${geometry.bar.bottom - key.tapBottom})`);
+          if (!key.inView) continue;
+          assert.ok(key.landsAbove && key.landsBelow, `${size.label}: a tap just inside a key's 44px touch target lands on the key (above ${key.landsAbove}, below ${key.landsBelow})`);
         }
         if (evidence) await page.screenshot({ path: join(evidence, `input-spacing-${size.label.replace(/\s+/g, "-")}.png`) });
       } finally { await context.close(); }
