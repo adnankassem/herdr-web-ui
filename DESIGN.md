@@ -2225,7 +2225,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   `pane.scroll`, which moves the shared viewport for every client, including the TUI. Requests
   retain their owning PC/pane, and a failed request displays an error instead of inventing a
   local history position.
-- A mirrored or observed grid may be wider than its mount. Its input caret and IME preedit stay
+- Every grid's input caret and IME preedit stay inside the visible mount. A grid this browser
+  drives fits the mount, yet a long preedit (a phone keyboard's voice typing sends one, growing with
+  each word) would otherwise make the browser scroll the mount sideways to keep the helper's caret in
+  view, sliding the whole grid off to the left. A mirrored or observed grid may be wider than its
+  mount. Its input caret and IME preedit stay
   inside the visible mount, at the terminal cursor when visible and at the nearest visible edge
   otherwise: inserting text must not move a manually panned view. This differs from Zed's
   locally sized terminal because this browser must preserve the remote owner's grid rather than
