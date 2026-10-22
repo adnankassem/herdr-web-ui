@@ -2313,7 +2313,9 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   (`Input held: “…”`) stays on one line in mono, cut with an ellipsis, with the whole text as its
   title: a command is never broken inside a word.
 - The mobile key bar starts with Esc, Tab and `^C`, then sticky Ctrl/Alt/Shift, Enter and arrows;
-  it never steals typing focus. Modifiers remain highlighted until toggled off,
+  it never steals typing focus, and on a touch screen it never takes the focus either: a key tapped
+  with the keyboard put away leaves it away (only the keyboard key or a tap on the line or the grid
+  raises it). Modifiers remain highlighted until toggled off,
   leaving the pane/lens or disconnecting; each exposes `aria-pressed`.
 - That is the default row. Settings → Terminal → Key bar can add, remove and reorder every
   terminal key and register exact combinations. Removing a held modifier clears it immediately.

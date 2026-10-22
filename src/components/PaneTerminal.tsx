@@ -2471,8 +2471,11 @@ export function PaneTerminal({
     reassertIfStaleRef.current();
     barKeyRef.current = { key: item.key, chord };
     try { term.input(input); } finally { barKeyRef.current = null; }
-    // with the input line, the keyboard belongs to it: a key tap must not move it to the grid
-    if (!inputLineRef.current) term.focus();
+    // with the input line, the keyboard belongs to it: a key tap must not move it to the grid. On a
+    // touch screen a key tap never takes the focus at all: focusing the grid raises the soft
+    // keyboard, and a key pressed with the keyboard put away (after dictating, say) must leave it
+    // away. Only the keyboard key, or a tap on the line or the grid, brings it up.
+    if (!inputLineRef.current && !coarseRef.current) term.focus();
   }, []);
 
   const toggleModifier = useCallback((modifier: keyof StickyModifiers) => {
@@ -2480,7 +2483,7 @@ export function PaneTerminal({
     const next = { ...modifiersRef.current, [modifier]: !modifiersRef.current[modifier] };
     modifiersRef.current = next;
     setModifiers(next);
-    if (!inputLineRef.current) termRef.current?.focus();
+    if (!inputLineRef.current && !coarseRef.current) termRef.current?.focus();
   }, []);
 
 
