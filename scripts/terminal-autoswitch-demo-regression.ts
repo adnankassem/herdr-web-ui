@@ -212,6 +212,8 @@ try {
         if (touch) {
           await page.waitForFunction((pane) => document.querySelector<HTMLButtonElement>(`.terminal-stack[data-pane-owner="${pane}"] .key-bar .key[data-key="Escape"]`)?.disabled === false, owner);
           await stack(page).locator('.key-bar .key[data-key="Escape"]').click();
+          // a key-bar tap sends its key without taking the focus: the keyboard stays down
+          assert.equal(await gridFocused(page), false, "a key-bar tap in the peek leaves a phone's keyboard down");
         } else await page.keyboard.press("Escape");
         await page.waitForFunction(([pane, before]) => (window as unknown as PeekWindow).sentFrames
           .filter((frame) => frame.type === "input" && frame.pane_id === pane && frame.text === "\x1b").length > before, [owner, escapes] as const);
