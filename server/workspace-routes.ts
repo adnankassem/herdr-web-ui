@@ -9,11 +9,12 @@ import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import { MAX_LABEL_CHARS } from "../shared/labels.ts";
 import { firstMessageFault } from "../shared/launch-rules.ts";
-import type { DirectoryCreated, PendingMessage, ServerMessage, TabMoved } from "../shared/protocol.ts";
+import type { DirectoryCreated, PendingMessage, ServerMessage, TabMoved, WorkspaceMoved } from "../shared/protocol.ts";
+import type { MoveReceipt } from "./order-sequence.ts";
 import { agentFault, agentLaunch, type AgentPayload } from "./agent-launch.ts";
 import { createDirectory, listDirectories } from "./directories.ts";
 import { HerdrError, tabClose, tabCreate, tabMove, tabRename, workspaceClose, workspaceCreate, workspaceMove, workspaceRename, worktreeCreate, worktreeList, worktreeOpen, worktreeRemove } from "./herdr/client.ts";
-import { badRequest, conflictResponse, errorResponse, isJsonObject, jsonResponse, readJsonObject } from "./http.ts";
+import { badRequest, conflictResponse, errorResponse, isJsonObject, jsonResponse, readJsonObject, setRequestRoute } from "./http.ts";
 import { paneContext } from "./pane-context.ts";
 import { repoDiffResponse } from "./repo-diff.ts";
 
@@ -35,8 +36,11 @@ const notQueued = (error: unknown): { error: { code: string; message: string } }
 
 /** The answer for a workspace route, or null when the path is not one. */
 export async function handleWorkspaceRequest(request: Request, url: URL, pathname: string, bunServer: Pick<Server<unknown>, "timeout">, broadcastAll: (message: ServerMessage) => void,
-  queueFirstMessage: (paneId: string, text: string, kind: string, requester: string | null, launchedPid: number | null) => Promise<PendingMessage>): Promise<Response | null> {
+  queueFirstMessage: (paneId: string, text: string, kind: string, requester: string | null, launchedPid: number | null) => Promise<PendingMessage>,
+  /** a move herdr confirmed: its receipt in this server's order (server/order-sequence.ts), taken at once */
+  workspaceMoved: () => MoveReceipt): Promise<Response | null> {
   if (pathname === "/api/workspace/directories" && request.method === "POST") {
+    setRequestRoute(pathname);
     let payload: unknown;
     try { payload = await request.json(); } catch { return badRequest("invalid_json", "request body must be JSON"); }
     if (!isJsonObject(payload) || typeof payload["path"] !== "string" || typeof payload["name"] !== "string") return badRequest("invalid_body", "path and name must be strings");
@@ -51,6 +55,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   }
 
   if (pathname === "/api/workspace/directories") {
+    setRequestRoute(pathname);
     if (request.method !== "GET") return badRequest("method_not_allowed", "use GET or POST");
     // a folder a pane's chat names is read from that pane's folder, as a file it names is
     const paneId = url.searchParams.get("pane_id");
@@ -66,6 +71,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   }
 
   if (pathname === "/api/workspace/diff/files" || pathname === "/api/workspace/diff/file") {
+    setRequestRoute(pathname);
     if (request.method !== "GET") return badRequest("method_not_allowed", "use GET");
     // file contents, like /api/fs/file: this app reads them, another site's page does not
     if (request.headers.get("sec-fetch-site") === "cross-site") return jsonResponse({ error: { code: "cross_site", message: "A repository's changes are read from this app" } }, 403);
@@ -93,6 +99,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   // the agent (if any) starts there through the one launch path, so names, retries and a
   // partial failure read the same for both.
   if (pathname === "/api/workspace/create" || pathname === "/api/tab/create") {
+    setRequestRoute(pathname);
     const inWorkspace = pathname === "/api/tab/create";
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
     const payload = await readJsonObject<{ workspace_id?: unknown; cwd?: unknown; label?: unknown; agent?: { kind?: unknown; name?: unknown; args?: unknown } | null; first_message?: unknown; first_message_connection?: unknown }>(request);
@@ -160,6 +167,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   // A worktree is a git checkout herdr opens as a workspace grouped with its repository's.
   // The workspace names the repository; herdr finds the checkout root from its folder.
   if (pathname === "/api/worktree/list") {
+    setRequestRoute(pathname);
     if (request.method !== "GET") return badRequest("method_not_allowed", "use GET");
     const workspaceId = url.searchParams.get("workspace_id") ?? "";
     if (workspaceId === "") return badRequest("missing_workspace_id", "workspace_id is required");
@@ -172,6 +180,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   }
 
   if (pathname === "/api/worktree/remove") {
+    setRequestRoute(pathname);
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
     const payload = await readJsonObject<{ workspace_id?: unknown; force?: unknown }>(request);
     if (payload instanceof Response) return payload;
@@ -192,6 +201,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   }
 
   if (pathname === "/api/worktree/create" || pathname === "/api/worktree/open") {
+    setRequestRoute(pathname);
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
     const payload = await readJsonObject<{ workspace_id?: unknown; branch?: unknown; base?: unknown; label?: unknown; path?: unknown; agent?: AgentPayload | null }>(request);
     if (payload instanceof Response) return payload;
@@ -262,6 +272,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
   }
 
   if (pathname === "/api/workspace/rename" || pathname === "/api/workspace/move" || pathname === "/api/workspace/close") {
+    setRequestRoute(pathname);
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
     const payload = await readJsonObject<{ workspace_id?: unknown; label?: unknown; insert_index?: unknown; close_group?: unknown }>(request);
     if (payload instanceof Response) return payload;
@@ -283,8 +294,10 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
     }
     try {
       if (pathname === "/api/workspace/rename") await workspaceRename(payload.workspace_id, payload.label as string);
-      else if (pathname === "/api/workspace/move") await workspaceMove(payload.workspace_id, payload.insert_index as number);
-      else await workspaceClose(payload.workspace_id, undefined, payload.close_group === true);
+      else if (pathname === "/api/workspace/move") {
+        await workspaceMove(payload.workspace_id, payload.insert_index as number);
+        return jsonResponse({ ok: true, ...workspaceMoved() } satisfies WorkspaceMoved);
+      } else await workspaceClose(payload.workspace_id, undefined, payload.close_group === true);
       // a closed workspace's panes send no exit: without this, clients learn of it only after
       // the collector's structure debounce, and the closed workspace stays on screen meanwhile
       if (pathname === "/api/workspace/close") broadcastAll({ type: "session-changed" });
@@ -296,6 +309,7 @@ export async function handleWorkspaceRequest(request: Request, url: URL, pathnam
 
   // herdr's prefix+shift+t and prefix+shift+x: a tab's name, and a tab closed with every pane in it
   if (pathname === "/api/tab/rename" || pathname === "/api/tab/close" || pathname === "/api/tab/move") {
+    setRequestRoute(pathname);
     if (request.method !== "POST") return badRequest("method_not_allowed", "use POST");
     const payload = await readJsonObject<{ tab_id?: unknown; label?: unknown; insert_index?: unknown }>(request);
     if (payload instanceof Response) return payload;
