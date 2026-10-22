@@ -119,7 +119,7 @@ export function useTabReorder({ owner, tabs, strip, moveTab, failed, stale, outs
     const row = strip.current;
     if (!held?.started || !row) { animation.current = null; return; }
     const box = row.getBoundingClientRect();
-    const right = row.querySelector<HTMLElement>(".tab-strip-tail")?.getBoundingClientRect().left ?? box.right;
+    const right = row.querySelector<HTMLElement>(".tab-strip-add")?.getBoundingClientRect().left ?? box.right;
     if (held.y >= box.top - 12 && held.y <= box.bottom + 12) {
       const direction = held.x < box.left + 28 ? -1 : held.x > right - 28 ? 1 : 0;
       if (direction) { row.scrollLeft += direction * 8; paintDrag(held); }

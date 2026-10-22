@@ -1302,13 +1302,9 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   Pane actions are not tab actions. Up to 768px, where a split tab shows one pane at a time, the
   tab's menu lists the tab's panes first, the open one marked current, over a hairline.
   Only at these narrow widths does it omit Split and Zoom pane; Unzoom pane stays available whenever the tab is zoomed.
-- An overflowing strip keeps every tab in reach. The `+` and, while the tabs do not fit, an
-  all-tabs chevron (the tab count and a `ChevronDown`) share a sticky tail at the strip's end, over a
-  hairline, with the tabs scrolling under it. The chevron opens the tab list (Menu / popover; the
-  sheet up to 768px): every tab in strip order, the open one marked current, a tab whose agents
-  run, wait for input, wait on background work or finished showing the strip's own dot or glyph and
-  the status word. A pick opens the tab as a click would and scrolls it into view. A vertical mouse
-  wheel over an overflowing strip scrolls it sideways; touch and trackpad scrolling are unchanged.
+- A vertical mouse wheel over a strip whose tabs do not fit scrolls it sideways, as VS Code's
+  editor tabs do, by the wheel's own unit (pixels, lines or pages). Touch, a trackpad's sideways
+  swipe and a strip whose tabs fit are left to the browser.
 - Mouse dragging previews an accent insertion line, with edge scrolling for an overflowing strip.
   The snapshot's tab order is authoritative: a tab's stable `number` is not its place. A drop calls
   `tab.move` with an insertion boundary before removal, within that workspace and PC. The visible

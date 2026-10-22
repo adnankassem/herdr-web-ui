@@ -1250,7 +1250,6 @@ export const ZH: Record<string, string> = {
   "An agent in it is still at work, and stops with the tab.": "其中的代理仍在工作，会随标签页一起停止。",
   "It is the last tab of {workspace}: the workspace closes with it, and the agents and shells in it stop.": "这是 {workspace} 的最后一个标签页：工作区会随之关闭，其中的代理和 shell 会停止。",
   "Tabs of {workspace}": "{workspace} 的标签页",
-  "All tabs ({n})": "全部标签页 ({n})",
   "{n} panes": "{n} 个窗格",
   "Ovis sends anonymous usage counts.": "Ovis 会匿名发送使用统计。",
   "What is sent": "发送的内容",
