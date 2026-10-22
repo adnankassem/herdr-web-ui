@@ -2449,7 +2449,9 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
 - The mobile key bar starts with Esc, Tab and `^C`, then sticky Ctrl/Alt/Shift, Enter and arrows;
   it never steals typing focus, and on a touch screen it never takes the focus either: a key tapped
   with the keyboard put away leaves it away (only the keyboard key or a tap on the line or the grid
-  raises it). Modifiers remain highlighted until toggled off,
+  raises it). That follows the platform's own rule rather than an app's: a button never raises a
+  phone's keyboard, only a text field does. A fine pointer, which raises no keyboard, still moves
+  the focus to the grid. Modifiers remain highlighted until toggled off,
   leaving the pane/lens or disconnecting; each exposes `aria-pressed`.
 - That is the default row. Settings → Terminal → Key bar can add, remove and reorder every
   terminal key and register exact combinations. Removing a held modifier clears it immediately.
