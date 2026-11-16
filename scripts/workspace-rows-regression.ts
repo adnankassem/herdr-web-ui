@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 import type { Page } from "playwright-core";
 import { createServer } from "../server/index.ts";
-import { HerdrError, herdrRpc, sessionSnapshot, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
+import { HerdrError, herdrRpc, paneSendKeys, paneSendText, sessionSnapshot, workspaceClose, workspaceCreate } from "../server/herdr/client.ts";
 import { UsageService } from "../server/usage.ts";
 import { contextMenuKey } from "./context-menu-key.ts";
 
@@ -80,7 +80,8 @@ try {
   assert.equal(process.env.HERDR_SOCKET, testSocketPath(), "test-herdr must select its isolated socket");
 
   // Given two independent workspaces at one full cwd, a third whose folder has the same
-  // basename, and a fourth alone in its folder. No agent or shell input is started.
+  // basename, and a fourth alone in its folder. No agent is started; the only shell input is the
+  // fourth pane's title, set near the end.
   const sharedCwd = join(root, "left", "project");
   const otherCwd = join(root, "right", "project");
   const loneCwd = join(root, "lone");
@@ -258,6 +259,16 @@ try {
     { selector: `${otherWorkspace} .workspace-name`, title: renamedSplit });
   assert.ok((await page.locator(`${otherWorkspace} .workspace-place`).textContent())?.includes(other.label),
     "the task row shows its representative pane title and keeps the workspace name beneath it");
+  // A shell at its home folder titles its terminal "~" (bash's `user@host: ~`), which names no
+  // project: the two-line row still leads with its workspace's name, as for a title that is its folder.
+  const loneWorkspace = workspaceSelector(lone.workspaceId);
+  await paneSendText(lone.paneId, "printf '\\033]2;~\\007'");
+  await paneSendKeys(lone.paneId, ["Enter"]);
+  // the row's tooltip ends with the pane's own title: wait until "~" has reached this browser
+  await page.waitForFunction((selector) => document.querySelector(selector)?.getAttribute("title")?.split(" — ").includes("~") === true,
+    `${loneWorkspace} .workspace-select`);
+  assert.equal(await page.locator(`${loneWorkspace} .workspace-name`).textContent(), lone.label,
+    "a shell titled ~ leads its two-line row with the workspace name");
   for (const width of [1280, 768, 375]) {
     await page.setViewportSize({ width, height: 900 });
     if (await page.locator(".drawer-toggle").isVisible()

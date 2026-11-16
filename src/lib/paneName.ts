@@ -15,6 +15,15 @@ export function tabTitle(title: string, agent: string | null | undefined): strin
 }
 
 /**
+ * A shell at its home folder titles its terminal "~" (bash's `user@host: ~`): the home folder written
+ * out, which names no project. It says as little as a title that is the pane's folder does, so a
+ * row treats it the same way and leads with the workspace.
+ */
+export function isHomeTitle(title: string): boolean {
+  return /^~[\\/]?$/.test(title.trim());
+}
+
+/**
  * A roster row drawn on two lines: what its pane is doing, and where under it. A shell's title
  * is often just its folder, which says nothing a workspace's name does not say better, so that
  * row leads with the workspace and keeps the second line for what is left to say.
@@ -31,7 +40,7 @@ export function taskRowLines({ paneTitle, labelled, folder, workspace, alias }: 
   /** a linked worktree's branch, when the label does not already say it */
   alias?: string | null;
 }): { title: string; place: string } {
-  const title = !labelled && paneTitle === folder ? workspace : paneTitle;
+  const title = !labelled && (paneTitle === folder || isHomeTitle(paneTitle)) ? workspace : paneTitle;
   const where = [workspace === title ? "" : workspace, alias && alias !== title && alias !== workspace ? alias : ""].filter(Boolean).join(" · ");
   const said = folder === title || folder === workspace || folder === alias;
   return { title, place: placeLine(where, said ? "" : folder) };
